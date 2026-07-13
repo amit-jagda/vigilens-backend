@@ -62,6 +62,8 @@ class FaceAnalyticsService:
             content = await file.read()
             with open(filepath, "wb") as f:
                 f.write(content)
+            from services.storage import storage_client
+            storage_client.upload_file(filepath, filepath)
 
             # Write to database
             uv = await self.repo.create_uploaded_video(
@@ -98,9 +100,10 @@ class FaceAnalyticsService:
 
         await self.repo.soft_delete_uploaded_video(video)
 
-        if video.saved_path and os.path.exists(video.saved_path):
+        if video.saved_path:
+            from services.storage import storage_client
             try:
-                os.remove(video.saved_path)
+                storage_client.delete_file(video.saved_path)
             except Exception:
                 pass
         await self.db.commit()
@@ -233,10 +236,11 @@ class FaceAnalyticsService:
         video_path, output_video_path, crop_paths = res
         # Remove physical files
         all_paths = [video_path, output_video_path] + crop_paths
+        from services.storage import storage_client
         for path in all_paths:
-            if path and os.path.exists(path):
+            if path:
                 try:
-                    os.remove(path)
+                    storage_client.delete_file(path)
                 except Exception:
                     pass
         await self.db.commit()

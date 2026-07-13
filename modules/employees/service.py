@@ -75,9 +75,10 @@ class EmployeeService:
 
         await self.repo.delete_employee(employee_id, tenant_id)
         
-        if employee.photo_path and os.path.exists(employee.photo_path):
+        if employee.photo_path:
+            from services.storage import storage_client
             try:
-                os.remove(employee.photo_path)
+                storage_client.delete_file(employee.photo_path)
             except Exception:
                 pass
         await self.db.commit()
@@ -105,9 +106,10 @@ class EmployeeService:
                 employee.employee_code = employee_code
 
         if file is not None:
-            if employee.photo_path and os.path.exists(employee.photo_path):
+            if employee.photo_path:
+                from services.storage import storage_client
                 try:
-                    os.remove(employee.photo_path)
+                    storage_client.delete_file(employee.photo_path)
                 except Exception:
                     pass
 
@@ -190,7 +192,9 @@ class EmployeeService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="The selected gallery media is not a photo."
             )
-        if not os.path.exists(gallery_media.filepath):
+        from services.storage import storage_client
+        local_path = storage_client.get_file_path(gallery_media.filepath)
+        if not os.path.exists(local_path):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Gallery media file does not exist on storage: '{gallery_media.filepath}'."
@@ -203,7 +207,7 @@ class EmployeeService:
         outputs_dir = os.path.join("storage", "employee_attendance_outputs", str(user_id))
         os.makedirs(outputs_dir, exist_ok=True)
         
-        with open(filepath, "rb") as f:
+        with open(local_path, "rb") as f:
             content = f.read()
 
         from modules.peopleanalytics.model import PeopleAnalyticsSession
@@ -301,6 +305,8 @@ class EmployeeService:
         output_filename = f"{session.id}_annotated.jpg"
         output_filepath = os.path.join(outputs_dir, output_filename)
         cv2.imwrite(output_filepath, img)
+        from services.storage import storage_client
+        storage_client.upload_file(output_filepath, output_filepath)
 
         session.status = "completed"
         session.output_video_path = output_filepath
@@ -355,7 +361,10 @@ class EmployeeService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Gallery media '{gallery_media_id}' is not a video file."
                 )
-            if not os.path.exists(gallery_media.filepath):
+            from services.storage import storage_client
+            # Verify file exists on remote or local storage
+            local_filepath = storage_client.get_file_path(gallery_media.filepath)
+            if not os.path.exists(local_filepath):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Gallery media file does not exist on storage: '{gallery_media.filepath}'."
@@ -429,9 +438,10 @@ class EmployeeService:
             )
         video_path, output_video_path = res
         # Only delete the annotated output file, keeping the raw gallery media
-        if output_video_path and os.path.exists(output_video_path):
+        if output_video_path:
+            from services.storage import storage_client
             try:
-                os.remove(output_video_path)
+                storage_client.delete_file(output_video_path)
             except Exception:
                 pass
         await self.db.commit()

@@ -33,11 +33,14 @@ class Settings(BaseSettings):
         return v
     
     # Storage Configuration
-    MINIO_ENDPOINT: str = "localhost:9000"
-    MINIO_ACCESS_KEY: str = "minioadmin"
-    MINIO_SECRET_KEY: str = "minioadmin"
-    MINIO_SECURE: bool = False
-    MINIO_BUCKET_NAME: str = "cv-media"
+    STORAGE_PROVIDER: str = "local"
+    LOCAL_STORAGE_PATH: str = "storage"
+    
+    # AWS S3 Settings
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_S3_BUCKET_NAME: str = ""
+    AWS_S3_REGION: str = "us-east-1"
 
     # Celery Configuration
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"

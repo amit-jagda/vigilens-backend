@@ -57,9 +57,25 @@ def custom_openapi():
 
 app.openapi = custom_openapi
 
-# Ensure the storage directory exists before mounting to avoid errors
+# Ensure the storage directory exists
 os.makedirs("storage", exist_ok=True)
-app.mount("/storage", StaticFiles(directory="storage"), name="storage")
+
+if settings.STORAGE_PROVIDER.lower() == "s3":
+    from fastapi.responses import RedirectResponse
+    @app.get("/storage/{path:path}")
+    async def get_storage_file(path: str):
+        from services.storage import storage_client
+        full_path = f"storage/{path}"
+        try:
+            url = storage_client.get_url(full_path)
+            return RedirectResponse(url=url, status_code=307)
+        except Exception:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"message": "File not found", "status": 404, "data": None}
+            )
+else:
+    app.mount("/storage", StaticFiles(directory="storage"), name="storage")
 
 # Add GZip compression middleware
 app.add_middleware(GZipMiddleware, minimum_size=1000)

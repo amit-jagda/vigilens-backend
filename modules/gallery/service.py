@@ -32,11 +32,11 @@ class GalleryService:
                     continue
                 else:
                     # Clean up old failed record and file
-                    if os.path.exists(existing.filepath):
-                        try:
-                            os.remove(existing.filepath)
-                        except Exception:
-                            pass
+                    from services.storage import storage_client
+                    try:
+                        storage_client.delete_file(existing.filepath)
+                    except Exception:
+                        pass
                     await self.db.delete(existing)
                     await self.db.flush()
 
@@ -54,6 +54,8 @@ class GalleryService:
                         if not chunk:
                             break
                         f.write(chunk)
+                from services.storage import storage_client
+                storage_client.upload_file(filepath, filepath)
 
             # Create database record in "completed" or "pending" status initially.
             # In general, we mark it as "completed" upload, or "pending" if it awaits processing.
@@ -88,17 +90,16 @@ class GalleryService:
                 detail="Gallery media source not found or unauthorized access."
             )
 
-        # Delete physical raw file from disk
-        if media.filepath and os.path.exists(media.filepath):
+        # Delete physical raw and processed files
+        from services.storage import storage_client
+        if media.filepath:
             try:
-                os.remove(media.filepath)
+                storage_client.delete_file(media.filepath)
             except Exception:
                 pass
-        
-        # Delete physical processed file from disk
-        if media.processed_filepath and os.path.exists(media.processed_filepath):
+        if media.processed_filepath:
             try:
-                os.remove(media.processed_filepath)
+                storage_client.delete_file(media.processed_filepath)
             except Exception:
                 pass
 
@@ -109,11 +110,12 @@ class GalleryService:
         """Soft deletes all gallery media sources for a tenant and deletes physical files."""
         filepaths = await self.repo.bulk_delete_media_sources(tenant_id)
         
+        from services.storage import storage_client
         deleted_count = 0
         for filepath in filepaths:
-            if filepath and os.path.exists(filepath):
+            if filepath:
                 try:
-                    os.remove(filepath)
+                    storage_client.delete_file(filepath)
                     deleted_count += 1
                 except Exception:
                     pass
@@ -142,19 +144,23 @@ class GalleryService:
                     return
                 
                 print(f"[HEIC Gallery Migration] Found {len(sources)} HEIC/HEIF gallery sources to convert.")
+                from services.storage import storage_client
                 for source in sources:
                     old_path = source.filepath
-                    if not os.path.exists(old_path):
+                    local_old_path = storage_client.get_file_path(old_path)
+                    if not os.path.exists(local_old_path):
                         continue
                     try:
-                        image = Image.open(old_path)
+                        image = Image.open(local_old_path)
                         if image.mode != "RGB":
                             image = image.convert("RGB")
                         
-                        base, _ = os.path.splitext(old_path)
+                        base, _ = os.path.splitext(local_old_path)
                         new_path = f"{base}.jpg"
                         
                         image.save(new_path, "JPEG", quality=90)
+                        storage_client.upload_file(new_path, new_path)
+                        
                         source.filepath = new_path
                         
                         if source.filename.lower().endswith(".heic"):
@@ -162,7 +168,7 @@ class GalleryService:
                         elif source.filename.lower().endswith(".heif"):
                             source.filename = source.filename[:-5] + ".jpg"
                         
-                        os.remove(old_path)
+                        storage_client.delete_file(old_path)
                         print(f"[HEIC Gallery Migration] Converted: {old_path} -> {new_path}")
                     except Exception as err:
                         print(f"[HEIC Gallery Migration] Failed to convert {old_path}: {err}")

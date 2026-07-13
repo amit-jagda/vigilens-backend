@@ -72,8 +72,10 @@ def process_people_analytics_task(
             await db.commit()
 
             try:
+                from services.storage import storage_client
+                local_filepath = storage_client.get_file_path(filepath)
                 # Check if file is image or video
-                file_ext = os.path.splitext(filepath)[1].lower()
+                file_ext = os.path.splitext(local_filepath)[1].lower()
                 is_image = file_ext in {".jpg", ".jpeg", ".png", ".heic", ".heif"}
 
                 # Initialize Redis client if needed
@@ -95,7 +97,7 @@ def process_people_analytics_task(
                         db=db,
                         repo=repo,
                         session=session,
-                        filepath=filepath,
+                        filepath=local_filepath,
                         model=model,
                         employee_cache=employee_cache,
                         similarity_threshold=similarity_threshold,
@@ -111,7 +113,7 @@ def process_people_analytics_task(
                         db=db,
                         repo=repo,
                         session=session,
-                        filepath=filepath,
+                        filepath=local_filepath,
                         model=model,
                         employee_cache=employee_cache,
                         line_start=line_start,
@@ -284,6 +286,8 @@ async def _process_image_job(
                         os.makedirs(user_crops_dir, exist_ok=True)
                         crop_path = os.path.join(user_crops_dir, crop_filename)
                         cv2.imwrite(crop_path, crop_img)
+                        from services.storage import storage_client
+                        storage_client.upload_file(crop_path, crop_path)
 
                     await repo.create_person_occurrence(
                         session_id=session.id,
@@ -332,6 +336,8 @@ async def _process_image_job(
     os.makedirs(user_outputs_dir, exist_ok=True)
     output_path = os.path.join(user_outputs_dir, output_filename)
     cv2.imwrite(output_path, img)
+    from services.storage import storage_client
+    storage_client.upload_file(output_path, output_path)
 
     # Generate flat occupancy timeline for static image (just 1 frame)
     occupancy_timeline = [{"time_sec": 0, "occupancy": total_person_count}] if track_occupancy else None
@@ -662,6 +668,8 @@ async def _process_video_job(
         videoFormatChanger(output_path, formats="h264", overwrite_input=True)
     except Exception as e:
         print(f"Video transcoding failed (falling back to raw mp4v): {e}")
+    from services.storage import storage_client
+    storage_client.upload_file(output_path, output_path)
 
     # Filter out very short, spurious tracks (e.g. tracks that lasted less than 10 frames)
     # BUT keep those that crossed the line so we can resolve their identity for crossing logs
@@ -724,6 +732,8 @@ async def _process_video_job(
                 os.makedirs(user_crops_dir, exist_ok=True)
                 crop_path = os.path.join(user_crops_dir, crop_filename)
                 cv2.imwrite(crop_path, best_crop)
+                from services.storage import storage_client
+                storage_client.upload_file(crop_path, crop_path)
 
             completed_occurrences.append({
                 "session_id": session.id,
