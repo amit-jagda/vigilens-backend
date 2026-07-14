@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: str = ""
     AWS_S3_BUCKET_NAME: str = ""
     AWS_S3_REGION: str = "us-east-1"
+    AWS_S3_KEY_PREFIX: str = ""
 
     # Celery Configuration
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
