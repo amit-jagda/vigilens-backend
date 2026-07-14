@@ -117,7 +117,7 @@ def process_video_search_task(
     session_id_str: str, 
     threshold: float = 0.45, 
     interval: float = 1.0, 
-    model_name: str = "buffalo_l"
+    model_name: str = "buffalo_s"
 ):
     """
     Celery task to search a target video file on-demand for a target face, 
@@ -127,178 +127,220 @@ def process_video_search_task(
     session_id = uuid.UUID(session_id_str)
 
     async def run():
-        async with SessionLocal() as db:
-            # 1. Load entities from DB without tenant checks for celery background runner
-            stmt_session = select(FaceSearchSession).where(
-                FaceSearchSession.id == session_id,
-                FaceSearchSession.is_delete == False
-            )
-            res_session = await db.execute(stmt_session)
-            session = res_session.scalars().first()
-            if not session:
-                return
+        try:
+            async with SessionLocal() as db:
+                print(f"[Vigilens Task] Starting video search task. Session ID: {session_id}, Video ID: {video_id}")
+                # 1. Load entities from DB without tenant checks for celery background runner
+                stmt_session = select(FaceSearchSession).where(
+                    FaceSearchSession.id == session_id,
+                    FaceSearchSession.is_delete == False
+                )
+                res_session = await db.execute(stmt_session)
+                session = res_session.scalars().first()
+                if not session:
+                    print(f"[Vigilens Task ERROR] Search Session {session_id} not found in DB.")
+                    return
 
-            stmt_media = select(MediaSource).where(
-                MediaSource.id == video_id,
-                MediaSource.is_delete == False
-            )
-            res_media = await db.execute(stmt_media)
-            media = res_media.scalars().first()
-            if not media:
-                session.status = "failed"
-                await db.commit()
-                return
+                stmt_media = select(MediaSource).where(
+                    MediaSource.id == video_id,
+                    MediaSource.is_delete == False
+                )
+                res_media = await db.execute(stmt_media)
+                media = res_media.scalars().first()
+                if not media:
+                    print(f"[Vigilens Task ERROR] Media Source {video_id} not found in DB.")
+                    session.status = "failed"
+                    await db.commit()
+                    return
 
-            # Setup matching directories
-            session_out_dir = os.path.join(VIDEO_MATCHES_DIR, str(session.id))
-            os.makedirs(session_out_dir, exist_ok=True)
+                # Setup matching directories
+                session_out_dir = os.path.join(VIDEO_MATCHES_DIR, str(session.id))
+                os.makedirs(session_out_dir, exist_ok=True)
 
-            from services.storage import storage_client
-            # Load all face embeddings from the reference selfie image if possible
-            group_embeddings = []
-            local_selfie_path = storage_client.get_file_path(session.selfie_path) if session.selfie_path else None
-            if local_selfie_path and os.path.exists(local_selfie_path):
-                try:
-                    with open(local_selfie_path, "rb") as sf:
-                        selfie_content = sf.read()
-                    selfie_faces = face_rec_service.extract_faces(selfie_content, model_name=model_name)
-                    group_embeddings = [np.array(face["embedding"]) for face in selfie_faces]
-                except Exception as e:
-                    print(f"Failed to extract group faces from {session.selfie_path}: {e}")
+                from services.storage import storage_client
+                # Load all face embeddings from the reference selfie image if possible
+                group_embeddings = []
+                print(f"[Vigilens Task] Downloading reference selfie: {session.selfie_path}")
+                local_selfie_path = storage_client.get_file_path(session.selfie_path) if session.selfie_path else None
+                if local_selfie_path and os.path.exists(local_selfie_path):
+                    try:
+                        print(f"[Vigilens Task] Extracting faces from reference selfie using model {model_name}...")
+                        with open(local_selfie_path, "rb") as sf:
+                            selfie_content = sf.read()
+                        selfie_faces = face_rec_service.extract_faces(selfie_content, model_name=model_name)
+                        group_embeddings = [np.array(face["embedding"]) for face in selfie_faces]
+                        print(f"[Vigilens Task] Extracted {len(group_embeddings)} face(s) from selfie.")
+                    except Exception as e:
+                        print(f"[Vigilens Task Warning] Failed to extract group faces from {session.selfie_path}: {e}")
 
-            # Fallback to the single stored database embedding if group extraction failed or detected no faces
-            if not group_embeddings:
-                group_embeddings = [np.array(session.selfie_embedding)]
+                # Fallback to the single stored database embedding if group extraction failed or detected no faces
+                if not group_embeddings:
+                    print("[Vigilens Task] Falling back to database-stored selfie embedding.")
+                    group_embeddings = [np.array(session.selfie_embedding)]
 
-            local_media_path = storage_client.get_file_path(media.filepath)
-            cap = cv2.VideoCapture(local_media_path)
-            if not cap.isOpened():
-                session.status = "failed"
-                await db.commit()
-                return
+                ref_embedding = group_embeddings[0]
 
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            if fps <= 0:
-                fps = 30.0
+                print(f"[Vigilens Task] Downloading/accessing target video: {media.filepath}")
+                local_media_path = storage_client.get_file_path(media.filepath)
+                print(f"[Vigilens Task] Opening video file: {local_media_path}")
+                cap = cv2.VideoCapture(local_media_path)
+                if not cap.isOpened():
+                    print(f"[Vigilens Task ERROR] Failed to open video file: {local_media_path}")
+                    session.status = "failed"
+                    await db.commit()
+                    return
 
-            frame_step = max(1, int(fps * interval))
-            f_idx = 0
-            matched_seconds = []
-            repo = PeopleFindRepository(db)
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                if fps <= 0:
+                    fps = 30.0
 
-            while True:
-                if f_idx % frame_step == 0:
-                    ret, frame = cap.read()
-                    if not ret or frame is None:
-                        break
+                frame_step = max(1, int(fps * interval))
+                f_idx = 0
+                matched_seconds = []
+                repo = PeopleFindRepository(db)
 
-                    # Downscale for CPU speedups
-                    h_orig, w_orig = frame.shape[:2]
-                    max_dim = 640
-                    if max(h_orig, w_orig) > max_dim:
-                        scale = max_dim / max(h_orig, w_orig)
-                        frame_small = cv2.resize(frame, (int(w_orig * scale), int(h_orig * scale)))
+                print(f"[Vigilens Task] Starting video analysis. Video FPS: {fps}, Frame Step: {frame_step} frames")
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                print(f"[Vigilens Task] Total frames in video: {total_frames}")
+
+                while True:
+                    if f_idx % frame_step == 0:
+                        ret, frame = cap.read()
+                        if not ret or frame is None:
+                            break
+
+                        # Log progress every 50 iterations of step frames
+                        if (f_idx // frame_step) % 50 == 0:
+                            progress_pct = (f_idx / total_frames) * 100 if total_frames > 0 else 0.0
+                            print(f"[Vigilens Task] Analyzing frame {f_idx}/{total_frames} ({progress_pct:.1f}%)...")
+
+                        # Downscale for CPU speedups
+                        h_orig, w_orig = frame.shape[:2]
+                        max_dim = 640
+                        if max(h_orig, w_orig) > max_dim:
+                            scale = max_dim / max(h_orig, w_orig)
+                            frame_small = cv2.resize(frame, (int(w_orig * scale), int(h_orig * scale)))
+                        else:
+                            scale = 1.0
+                            frame_small = frame
+
+                        # Encode to bytes
+                        _, encoded_img = cv2.imencode(".jpg", frame_small)
+                        frame_bytes = encoded_img.tobytes()
+
+                        # Extract face embeddings
+                        faces = face_rec_service.extract_faces(frame_bytes, model_name=model_name)
+
+                        if len(faces) > 0:
+                            sec = f_idx / fps
+                            time_str = format_time(sec)
+
+                            # Match faces in the current frame
+                            frame_embeddings = np.array([face["embedding"] for face in faces])
+                            similarities = cosine_similarity([ref_embedding], frame_embeddings)[0]
+
+                            best_sim = -1.0
+                            best_face = None
+
+                            for idx, sim in enumerate(similarities):
+                                if sim >= threshold and sim > best_sim:
+                                    best_sim = sim
+                                    best_face = faces[idx]
+
+                            if best_face is not None:
+                                print(f"[Vigilens Task] Match found at {time_str} (similarity: {best_sim:.3f})")
+                                # Restore coordinates back to original video size
+                                x1 = max(0, min(int(best_face["bbox"][0] / scale), w_orig - 1))
+                                y1 = max(0, min(int(best_face["bbox"][1] / scale), h_orig - 1))
+                                x2 = max(0, min(int(best_face["bbox"][2] / scale), w_orig - 1))
+                                y2 = max(0, min(int(best_face["bbox"][3] / scale), h_orig - 1))
+                                orig_bbox = [x1, y1, x2, y2]
+
+                                matched_seconds.append(sec)
+
+                                # Save FaceSearchResult in database
+                                await repo.create_search_result(
+                                    session_id=session.id,
+                                    media_source_id=media.id,
+                                    similarity=best_sim,
+                                    bbox=orig_bbox,
+                                    timestamp=sec
+                                )
+
+                                # Annotate frame and save keyframe image
+                                vis_frame = draw_bbox_on_image(frame, orig_bbox, best_sim, time_str)
+                                time_filename = time_str.replace(":", "_")
+                                out_img_path = os.path.join(session_out_dir, f"frame_{time_filename}.jpg")
+                                cv2.imwrite(out_img_path, vis_frame)
+                                storage_client.upload_file(out_img_path, out_img_path)
+
+                        # Fast grab skip
+                        for _ in range(frame_step - 1):
+                            ret = cap.grab()
+                            if not ret:
+                                break
+                            f_idx += 1
                     else:
-                        scale = 1.0
-                        frame_small = frame
-
-                    # Encode to bytes
-                    _, encoded_img = cv2.imencode(".jpg", frame_small)
-                    frame_bytes = encoded_img.tobytes()
-
-                    # Extract face embeddings
-                    faces = face_rec_service.extract_faces(frame_bytes, model_name=model_name)
-
-                    if len(faces) > 0:
-                        sec = f_idx / fps
-                        time_str = format_time(sec)
-
-                        # Match faces in the current frame
-                        frame_embeddings = np.array([face["embedding"] for face in faces])
-                        similarities = cosine_similarity([ref_embedding], frame_embeddings)[0]
-
-                        best_sim = -1.0
-                        best_face = None
-
-                        for idx, sim in enumerate(similarities):
-                            if sim >= threshold and sim > best_sim:
-                                best_sim = sim
-                                best_face = faces[idx]
-
-                        if best_face is not None:
-                            # We found a match in the video frame!
-                            # Restore coordinates back to original video size
-                            x1 = max(0, min(int(best_face["bbox"][0] / scale), w_orig - 1))
-                            y1 = max(0, min(int(best_face["bbox"][1] / scale), h_orig - 1))
-                            x2 = max(0, min(int(best_face["bbox"][2] / scale), w_orig - 1))
-                            y2 = max(0, min(int(best_face["bbox"][3] / scale), h_orig - 1))
-                            orig_bbox = [x1, y1, x2, y2]
-
-                            matched_seconds.append(sec)
-
-                            # Save FaceSearchResult in database
-                            await repo.create_search_result(
-                                session_id=session.id,
-                                media_source_id=media.id,
-                                similarity=best_sim,
-                                bbox=orig_bbox,
-                                timestamp=sec
-                            )
-
-                            # Annotate frame and save keyframe image
-                            vis_frame = draw_bbox_on_image(frame, orig_bbox, best_sim, time_str)
-                            time_filename = time_str.replace(":", "_")
-                            out_img_path = os.path.join(session_out_dir, f"frame_{time_filename}.jpg")
-                            cv2.imwrite(out_img_path, vis_frame)
-                            storage_client.upload_file(out_img_path, out_img_path)
-
-                    # Fast grab skip
-                    for _ in range(frame_step - 1):
                         ret = cap.grab()
                         if not ret:
                             break
-                        f_idx += 1
-                else:
-                    ret = cap.grab()
-                    if not ret:
-                        break
 
-                f_idx += 1
+                    f_idx += 1
 
-            cap.release()
+                cap.release()
+                print(f"[Vigilens Task] Finished frame analysis. Found {len(matched_seconds)} matches total.")
 
-            # Group matches into intervals
-            max_gap = interval * 2.0
-            intervals = group_timestamps(matched_seconds, max_gap)
+                # Group matches into intervals
+                max_gap = interval * 2.0
+                intervals = group_timestamps(matched_seconds, max_gap)
 
-            # Generate and write txt report
-            report_path = os.path.join(session_out_dir, "report.txt")
-            with open(report_path, "w") as rf:
-                rf.write("=====================================================\n")
-                rf.write("  ON-DEMAND VIDEO SEARCH REPORT\n")
-                rf.write("=====================================================\n")
-                rf.write(f"Video File ID    : {media.id}\n")
-                rf.write(f"Original Name    : {media.filename}\n")
-                rf.write(f"Search Session   : {session.id}\n")
-                rf.write(f"Threshold        : {threshold}\n")
-                rf.write(f"Sample Interval  : {interval}s\n")
-                rf.write(f"Total Matches    : {len(matched_seconds)} frame(s)\n")
-                rf.write("-----------------------------------------------------\n\n")
+                # Generate and write txt report
+                report_path = os.path.join(session_out_dir, "report.txt")
+                print(f"[Vigilens Task] Generating presence report at {report_path}...")
+                with open(report_path, "w") as rf:
+                    rf.write("=====================================================\n")
+                    rf.write("  ON-DEMAND VIDEO SEARCH REPORT\n")
+                    rf.write("=====================================================\n")
+                    rf.write(f"Video File ID    : {media.id}\n")
+                    rf.write(f"Original Name    : {media.filename}\n")
+                    rf.write(f"Search Session   : {session.id}\n")
+                    rf.write(f"Threshold        : {threshold}\n")
+                    rf.write(f"Sample Interval  : {interval}s\n")
+                    rf.write(f"Total Matches    : {len(matched_seconds)} frame(s)\n")
+                    rf.write("-----------------------------------------------------\n\n")
 
-                if intervals:
-                    rf.write("Detected Timestamps (Intervals):\n")
-                    for start, end in intervals:
-                        if start == end:
-                            rf.write(f"  • {format_time(start)}\n")
-                        else:
-                            rf.write(f"  • {format_time(start)} to {format_time(end)}\n")
-                else:
-                    rf.write("No matching face detected in the video.\n")
+                    if intervals:
+                        rf.write("Detected Timestamps (Intervals):\n")
+                        for start, end in intervals:
+                            if start == end:
+                                rf.write(f"  • {format_time(start)}\n")
+                            else:
+                                rf.write(f"  • {format_time(start)} to {format_time(end)}\n")
+                    else:
+                        rf.write("No matching face detected in the video.\n")
 
-            storage_client.upload_file(report_path, report_path)
-            # Update session status
-            session.status = "completed"
-            await db.commit()
+                storage_client.upload_file(report_path, report_path)
+                # Update session status
+                session.status = "completed"
+                await db.commit()
+                print("[Vigilens Task] Task completed successfully!")
+        except Exception as e:
+            import traceback
+            print(f"[Vigilens Task FATAL ERROR] Task failed with exception: {e}")
+            traceback.print_exc()
+            try:
+                async with SessionLocal() as db_err:
+                    stmt_session_err = select(FaceSearchSession).where(
+                        FaceSearchSession.id == session_id
+                    )
+                    res_session_err = await db_err.execute(stmt_session_err)
+                    session_err = res_session_err.scalars().first()
+                    if session_err:
+                        session_err.status = "failed"
+                        await db_err.commit()
+                        print("[Vigilens Task] Database status successfully updated to 'failed'.")
+            except Exception as db_ex:
+                print(f"[Vigilens Task FATAL ERROR] Failed to set status to 'failed': {db_ex}")
 
     run_async(run())
 

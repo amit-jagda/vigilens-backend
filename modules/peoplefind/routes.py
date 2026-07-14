@@ -166,7 +166,7 @@ async def search_video_on_demand(
     file: UploadFile = File(..., description="Your reference selfie/profile photo"),
     threshold: float = Form(0.45, ge=0.0, le=1.0, description="Similarity matching threshold (default: 0.45)"),
     interval: float = Form(1.0, ge=0.1, description="Sampling interval in seconds (default: 1.0)"),
-    buffalo_model: str = Form("buffalo_l", description="InsightFace model to use (default: 'buffalo_l')"),
+    buffalo_model: str = Form("buffalo_s", description="InsightFace model to use (default: 'buffalo_s')"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
