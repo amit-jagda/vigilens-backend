@@ -89,6 +89,8 @@ def index_objectcount_task(
     
     async def run():
         async with SessionLocal() as db:
+            from services.storage import storage_client
+            local_filepath = storage_client.get_file_path(filepath)
             from modules.objectcount.repository import ObjectCountRepository
             from modules.objectcount.tracker import BoTSORTTracker, STrack
             from modules.objectcount.gender_classifier import InsightFaceGenderClassifier
@@ -174,7 +176,7 @@ def index_objectcount_task(
                 frame = None
                 try:
                     pillow_heif.register_heif_opener()
-                    with open(filepath, "rb") as f:
+                    with open(local_filepath, "rb") as f:
                         content = f.read()
                     image = Image.open(io.BytesIO(content))
                     if image.mode != "RGB":
@@ -184,7 +186,7 @@ def index_objectcount_task(
                     frame = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
                 except Exception as e:
                     logger.error(f"Pillow image decoding failed: {e}. Falling back to OpenCV.")
-                    frame = cv2.imread(filepath)
+                    frame = cv2.imread(local_filepath)
                 
                 if frame is None:
                     await repo.update_media_status(media_id, "failed")
@@ -310,12 +312,28 @@ def index_objectcount_task(
                         text_y1 = max(y1 - 5 - text_h - baseline, 0)
                         cv2.rectangle(annotated_frame, (x1, text_y1), (x1 + text_w + 10, text_y1 + text_h + baseline + 5), color, -1)
                         cv2.putText(annotated_frame, label, (x1 + 5, text_y1 + text_h + baseline), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+                        
+                        # Save details in database ObjectCountResult table for photo detections
+                        await repo.create_result(
+                            media_id=media_id,
+                            track_id=total_detected,
+                            class_name=class_name,
+                            gender=resolved_gender,
+                            first_frame=0,
+                            last_frame=0,
+                            total_frames=1,
+                            start_time=0.0,
+                            end_time=0.0
+                        )
                 
                 # Save annotated frame to disk
                 out_filename = f"processed_{media_id}.jpg"
                 processed_filepath = os.path.join("storage", "objectcount_outputs", out_filename)
                 os.makedirs(os.path.dirname(processed_filepath), exist_ok=True)
                 cv2.imwrite(processed_filepath, annotated_frame)
+                
+                # Upload annotated frame to S3
+                storage_client.upload_file(processed_filepath, processed_filepath)
                 
                 report_summary = {
                     "total_unique_objects": total_detected,
@@ -340,7 +358,7 @@ def index_objectcount_task(
                 
             elif media_type == "video":
                 # Process video
-                cap = cv2.VideoCapture(filepath)
+                cap = cv2.VideoCapture(local_filepath)
                 if not cap.isOpened():
                     await repo.update_media_status(media_id, "failed")
                     await db.commit()
@@ -754,6 +772,9 @@ def index_objectcount_task(
                     videoFormatChanger(processed_filepath, formats="h264", overwrite_input=True)
                 except Exception as e:
                     logger.error(f"Video transcoding failed (falling back to raw mp4v): {e}")
+                
+                # Upload transcoded video to S3
+                storage_client.upload_file(processed_filepath, processed_filepath)
                 
                 # Apply noise filter to get final results
                 filtered_tracks = {tid: info for tid, info in tracks_history.items() if info["total_frames"] >= min_track_frames}
