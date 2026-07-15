@@ -5,8 +5,9 @@ import torch
 import logging
 # Prevent OpenCV multi-threading conflicts with Celery fork
 cv2.setNumThreads(0)
-# Prevent PyTorch thread conflicts
-torch.set_num_threads(1)
+# Prevent PyTorch thread conflicts; use full CPU cores if GPU is unavailable
+if torch.cuda.is_available():
+    torch.set_num_threads(1)
 
 import numpy as np
 from sqlalchemy import select
