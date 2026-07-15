@@ -1,6 +1,6 @@
 import uuid
 from sqlalchemy import String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from database.base import BaseModel
 
 class GalleryMedia(BaseModel):
@@ -16,3 +16,5 @@ class GalleryMedia(BaseModel):
     processed_filepath: Mapped[str | None] = mapped_column(String(512), nullable=True) # Path to processed/annotated output file
     media_type: Mapped[str] = mapped_column(String(20), nullable=False)  # 'photo' | 'video'
     status: Mapped[str] = mapped_column(String(20), default="pending")    # 'pending' | 'processing' | 'completed' | 'failed'
+
+    config = relationship("ActivityConfig", back_populates="gallery_media", lazy="selectin", uselist=False)
