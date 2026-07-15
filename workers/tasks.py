@@ -153,11 +153,13 @@ def process_video_search_task(
             session_out_dir = os.path.join(VIDEO_MATCHES_DIR, str(session.id))
             os.makedirs(session_out_dir, exist_ok=True)
 
+            from services.storage import storage_client
             # Load all face embeddings from the reference selfie image if possible
             group_embeddings = []
-            if session.selfie_path and os.path.exists(session.selfie_path):
+            local_selfie_path = storage_client.get_file_path(session.selfie_path) if session.selfie_path else None
+            if local_selfie_path and os.path.exists(local_selfie_path):
                 try:
-                    with open(session.selfie_path, "rb") as sf:
+                    with open(local_selfie_path, "rb") as sf:
                         selfie_content = sf.read()
                     selfie_faces = face_rec_service.extract_faces(selfie_content, model_name=model_name)
                     group_embeddings = [np.array(face["embedding"]) for face in selfie_faces]
@@ -168,7 +170,8 @@ def process_video_search_task(
             if not group_embeddings:
                 group_embeddings = [np.array(session.selfie_embedding)]
 
-            cap = cv2.VideoCapture(media.filepath)
+            local_media_path = storage_client.get_file_path(media.filepath)
+            cap = cv2.VideoCapture(local_media_path)
             if not cap.isOpened():
                 session.status = "failed"
                 await db.commit()
@@ -247,6 +250,7 @@ def process_video_search_task(
                             time_filename = time_str.replace(":", "_")
                             out_img_path = os.path.join(session_out_dir, f"frame_{time_filename}.jpg")
                             cv2.imwrite(out_img_path, vis_frame)
+                            storage_client.upload_file(out_img_path, out_img_path)
 
                     # Fast grab skip
                     for _ in range(frame_step - 1):
@@ -291,6 +295,7 @@ def process_video_search_task(
                 else:
                     rf.write("No matching face detected in the video.\n")
 
+            storage_client.upload_file(report_path, report_path)
             # Update session status
             session.status = "completed"
             await db.commit()
@@ -340,6 +345,9 @@ def index_peoplecount_task(
             # Reset ByteTrack static ID counter
             STrack.reset_id_counter()
 
+            from services.storage import storage_client
+            local_filepath = storage_client.get_file_path(filepath)
+            
             if media_type == "photo":
                 # Decode image using Pillow for maximum compatibility (HEIC, PNG, JPEG, WEBP, etc.)
                 from PIL import Image
@@ -349,7 +357,7 @@ def index_peoplecount_task(
                 frame = None
                 try:
                     pillow_heif.register_heif_opener()
-                    with open(filepath, "rb") as f:
+                    with open(local_filepath, "rb") as f:
                         content = f.read()
                     image = Image.open(io.BytesIO(content))
                     if image.mode != "RGB":
@@ -359,7 +367,7 @@ def index_peoplecount_task(
                     frame = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
                 except Exception as e:
                     logger.error(f"Pillow image decoding failed: {e}. Falling back to OpenCV.")
-                    frame = cv2.imread(filepath)
+                    frame = cv2.imread(local_filepath)
                 
                 if frame is None:
                     await repo.update_media_status(media_id, "failed")
@@ -389,6 +397,7 @@ def index_peoplecount_task(
                 processed_filepath = os.path.join("storage", "peoplecount_outputs", out_filename)
                 os.makedirs(os.path.dirname(processed_filepath), exist_ok=True)
                 cv2.imwrite(processed_filepath, annotated_frame)
+                storage_client.upload_file(processed_filepath, processed_filepath)
                 
                 # Update DB
                 await repo.update_media_results(
@@ -404,7 +413,8 @@ def index_peoplecount_task(
                 
             elif media_type == "video":
                 # Process video
-                cap = cv2.VideoCapture(filepath)
+                local_filepath = storage_client.get_file_path(filepath)
+                cap = cv2.VideoCapture(local_filepath)
                 if not cap.isOpened():
                     await repo.update_media_status(media_id, "failed")
                     await db.commit()
@@ -527,6 +537,7 @@ def index_peoplecount_task(
                     videoFormatChanger(processed_filepath, formats="h264", overwrite_input=True)
                 except Exception as e:
                     logger.error(f"Video transcoding failed (falling back to raw mp4v): {e}")
+                storage_client.upload_file(processed_filepath, processed_filepath)
                 
                 # Apply noise filter
                 filtered_tracks = {tid: info for tid, info in tracks_history.items() if info["total_frames"] >= min_track_frames}

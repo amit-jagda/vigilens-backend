@@ -39,11 +39,11 @@ class PeopleFindService:
                     continue
                 else:
                     # Failed or pending status, delete old record & file and re-process
-                    if os.path.exists(existing.filepath):
-                        try:
-                            os.remove(existing.filepath)
-                        except Exception:
-                            pass
+                    from services.storage import storage_client
+                    try:
+                        storage_client.delete_file(existing.filepath)
+                    except Exception:
+                        pass
                     await self.db.delete(existing)
                     await self.db.flush()
 
@@ -58,6 +58,8 @@ class PeopleFindService:
                 filepath = os.path.join(MEDIA_SOURCES_DIR, unique_name)
                 with open(filepath, "wb") as f:
                     f.write(content)
+                from services.storage import storage_client
+                storage_client.upload_file(filepath, filepath)
 
             # Create database record
             media = await self.repo.create_media_source(
@@ -170,13 +172,15 @@ class PeopleFindService:
         Helper method that processes a photo, extracts faces, 
         and indexes faces into the database. Called asynchronously by Celery.
         """
-        if not os.path.exists(filepath):
+        from services.storage import storage_client
+        local_path = storage_client.get_file_path(filepath)
+        if not os.path.exists(local_path):
             await self.repo.update_media_source_status(media_id, "failed")
             await self.db.commit()
             return
 
         try:
-            with open(filepath, "rb") as f:
+            with open(local_path, "rb") as f:
                 content = f.read()
 
             faces = face_rec_service.extract_faces(content)
@@ -200,14 +204,16 @@ class PeopleFindService:
         Helper method that processes a video, extracts frames at intervals, 
         and indexes faces into the database with timestamps.
         """
-        if not os.path.exists(filepath):
+        from services.storage import storage_client
+        local_path = storage_client.get_file_path(filepath)
+        if not os.path.exists(local_path):
             await self.repo.update_media_source_status(media_id, "failed")
             await self.db.commit()
             return
 
         try:
             face_count = 0
-            for face in face_rec_service.extract_faces_from_video(filepath, interval):
+            for face in face_rec_service.extract_faces_from_video(local_path, interval):
                 await self.repo.create_face_embedding(
                     media_source_id=media_id,
                     face_idx=face_count,
@@ -331,10 +337,11 @@ class PeopleFindService:
                 detail="Media source not found or unauthorized access."
             )
 
-        # Delete physical file from disk
-        if media.filepath and os.path.exists(media.filepath):
+        # Delete physical file
+        from services.storage import storage_client
+        if media.filepath:
             try:
-                os.remove(media.filepath)
+                storage_client.delete_file(media.filepath)
             except Exception:
                 pass
 
@@ -354,12 +361,13 @@ class PeopleFindService:
         """
         filepaths = await self.repo.bulk_delete_media_sources(tenant_id)
         
-        # Delete files from disk
+        # Delete files
+        from services.storage import storage_client
         deleted_count = 0
         for filepath in filepaths:
-            if filepath and os.path.exists(filepath):
+            if filepath:
                 try:
-                    os.remove(filepath)
+                    storage_client.delete_file(filepath)
                     deleted_count += 1
                 except Exception:
                     pass
@@ -455,20 +463,24 @@ class PeopleFindService:
                     return
                 
                 print(f"[HEIC Migration] Found {len(sources)} HEIC/HEIF media sources to convert.")
+                from services.storage import storage_client
                 for source in sources:
                     old_path = source.filepath
-                    if not os.path.exists(old_path):
-                        print(f"[HEIC Migration] File not found on disk: {old_path}")
+                    local_old_path = storage_client.get_file_path(old_path)
+                    if not os.path.exists(local_old_path):
+                        print(f"[HEIC Migration] File not found: {old_path}")
                         continue
                     try:
-                        image = Image.open(old_path)
+                        image = Image.open(local_old_path)
                         if image.mode != "RGB":
                             image = image.convert("RGB")
                         
-                        base, _ = os.path.splitext(old_path)
+                        base, _ = os.path.splitext(local_old_path)
                         new_path = f"{base}.jpg"
                         
                         image.save(new_path, "JPEG", quality=90)
+                        storage_client.upload_file(new_path, new_path)
+                        
                         source.filepath = new_path
                         
                         if source.filename.lower().endswith(".heic"):
@@ -476,7 +488,7 @@ class PeopleFindService:
                         elif source.filename.lower().endswith(".heif"):
                             source.filename = source.filename[:-5] + ".jpg"
                         
-                        os.remove(old_path)
+                        storage_client.delete_file(old_path)
                         print(f"[HEIC Migration] Converted: {old_path} -> {new_path}")
                     except Exception as err:
                         print(f"[HEIC Migration] Failed to convert {old_path}: {err}")

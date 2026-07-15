@@ -24,6 +24,9 @@ def convert_and_save_image(content: bytes, filename: str, target_dir: str) -> st
             unique_name = f"{uuid.uuid4()}.jpg"
             filepath = os.path.join(target_dir, unique_name)
             image.save(filepath, "JPEG", quality=90)
+            
+            from services.storage import storage_client
+            storage_client.upload_file(filepath, filepath)
             return filepath
         except Exception as e:
             print(f"HEIC conversion failed, falling back: {str(e)}")
@@ -31,4 +34,7 @@ def convert_and_save_image(content: bytes, filename: str, target_dir: str) -> st
     filepath = os.path.join(target_dir, unique_name)
     with open(filepath, "wb") as f:
         f.write(content)
+        
+    from services.storage import storage_client
+    storage_client.upload_file(filepath, filepath)
     return filepath
