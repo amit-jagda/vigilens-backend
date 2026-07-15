@@ -2,7 +2,10 @@ from shared.utils.video_format import videoFormatChanger
 import os
 import uuid
 import cv2
+import logging
 from datetime import datetime, timezone, timedelta
+
+logger = logging.getLogger(__name__)
 # Prevent OpenCV multi-threading conflicts with Celery fork
 cv2.setNumThreads(0)
 
@@ -72,6 +75,7 @@ def process_people_analytics_task(
             await db.commit()
 
             try:
+                logger.info(f"People Analytics processing started for session ID {session_id}. File: {filepath}")
                 from services.storage import storage_client
                 local_filepath = storage_client.get_file_path(filepath)
                 # Check if file is image or video
@@ -127,10 +131,12 @@ def process_people_analytics_task(
                         line_crossing_analysis=line_crossing_analysis,
                         track_occupancy=track_occupancy
                     )
+                logger.info(f"People Analytics processing completed successfully for session ID {session_id}.")
 
             except Exception as e:
                 import traceback
                 traceback.print_exc()
+                logger.error(f"People Analytics processing failed for session ID {session_id}. Error: {str(e)}")
                 session.status = "failed"
                 await db.commit()
 
@@ -147,6 +153,7 @@ async def _process_image_job(
     # Process static image
     img = cv2.imread(filepath)
     if img is None:
+        logger.error(f"People Analytics processing failed for session ID {session.id}: Image file could not be read.")
         raise ValueError("Could not read image file.")
 
     h_orig, w_orig = img.shape[:2]
@@ -368,6 +375,7 @@ async def _process_video_job(
 ):
     cap = cv2.VideoCapture(filepath)
     if not cap.isOpened():
+        logger.error(f"People Analytics processing failed for session ID {session.id}: Video file could not be opened.")
         raise ValueError("Could not open video file.")
 
     orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -417,6 +425,11 @@ async def _process_video_job(
         ret, frame = cap.read()
         if not ret or frame is None:
             break
+
+        if frame_idx % 10 == 0:
+            progress = int((frame_idx / total_frames) * 100) if total_frames > 0 else 0
+            frames_left = total_frames - frame_idx
+            logger.info(f"Session {session.id} - Processing frame {frame_idx}/{total_frames} ({progress}% completed, {frames_left} frames left)...")
 
         timestamp_sec = frame_idx / fps
         frame_idx += 1

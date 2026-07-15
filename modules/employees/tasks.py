@@ -37,7 +37,7 @@ def process_employee_attendance_video_task(
     Celery background task for standalone employee video attendance tracking.
     """
     session_id = uuid.UUID(session_id_str)
-    logger.info(f"Starting standalone employee attendance task for session_id={session_id_str}, filepath={filepath}")
+    logger.info(f"Employee Attendance processing started for session ID {session_id}. File: {filepath}")
 
     async def run():
         async with SessionLocal() as db:
@@ -121,8 +121,10 @@ def process_employee_attendance_video_task(
                     timestamp_sec = frame_idx / fps
                     frame_idx += 1
 
-                    if frame_idx % 100 == 0:
-                        logger.info(f"Session {session.id}: Processed {frame_idx}/{total_frames} frames ({int(frame_idx/total_frames*100)}% done)")
+                    if frame_idx % 10 == 0:
+                        progress = int((frame_idx / total_frames) * 100) if total_frames > 0 else 0
+                        frames_left = total_frames - frame_idx
+                        logger.info(f"Session {session.id} - Processing frame {frame_idx}/{total_frames} ({progress}% completed, {frames_left} frames left)...")
 
                     # Run person-only inference
                     results = model(
@@ -256,10 +258,10 @@ def process_employee_attendance_video_task(
                 session.unique_person_count = len(unique_employees)
                 session.completed_at = datetime.now(timezone.utc)
                 await db.commit()
-                logger.info(f"Employee attendance task finished successfully for session_id={session_id_str}")
+                logger.info(f"Employee Attendance processing completed successfully for session ID {session_id}.")
 
             except Exception as e:
-                logger.exception(f"Exception occurred in employee attendance task run loop for session_id={session_id_str}: {e}")
+                logger.error(f"Employee Attendance processing failed for session ID {session_id}. Error: {str(e)}")
                 session.status = "failed"
                 await db.commit()
 
