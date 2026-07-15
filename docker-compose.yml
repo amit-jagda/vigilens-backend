@@ -5,12 +5,13 @@ services:
     image: pgvector/pgvector:pg15
     platform: linux/amd64 # add this
     container_name: cv_backend_db
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin}
       POSTGRES_DB: ${POSTGRES_DB:-cv_db}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432" # Securely bind to localhost only (accessible by host migrations / tools)
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -22,8 +23,9 @@ services:
   redis:
     image: redis:7-alpine
     container_name: cv_backend_redis
+    restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379" # Securely bind to localhost only (accessible by host cache / worker)
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
@@ -33,6 +35,7 @@ services:
   app:
     build: .
     container_name: cv_backend_app
+    restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
@@ -55,6 +58,7 @@ services:
   worker:
     build: .
     container_name: cv_backend_worker
+    restart: unless-stopped
     command: celery -A workers.celery worker --loglevel=info --concurrency=1
     volumes:
       - .:/app

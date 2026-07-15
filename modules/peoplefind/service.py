@@ -107,7 +107,7 @@ class PeopleFindService:
         tenant_id: uuid.UUID,
         user_id: Optional[uuid.UUID] = None,
         interval: float = 1.0,
-        model_name: str = "buffalo_l"
+        model_name: str = "buffalo_s"
     ) -> FaceSearchSession:
         """
         Registers a selfie and launches a Celery task to search occurrences of that face 

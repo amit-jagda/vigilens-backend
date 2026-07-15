@@ -76,9 +76,9 @@ class ActivityService:
         
         config = await self.repo.get_activity_config(gallery_media_id, tenant_id)
         return {
-            "gallery_media_id": media.id,
+            "media_id": media.id,
             "status": media.status,
-            "processed_filepath": media.processed_filepath,
+            "output_filepath": media.processed_filepath,
             "config": config
         }
 

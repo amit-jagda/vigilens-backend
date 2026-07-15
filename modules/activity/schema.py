@@ -35,7 +35,7 @@ class ActivityConfigResponse(ActivityConfigBase):
         from_attributes = True
 
 
-class ActivityProcessPayload(ActivityConfigBase):
+class ActivityProcessPayload(ActivityConfigPayload):
     interval: float = Field(1.0, description="Frame sampling interval in seconds")
 
 
@@ -55,9 +55,9 @@ class ActivityMediaResponse(BaseModel):
 
 
 class ActivityProcessStatusResponse(BaseModel):
-    gallery_media_id: UUID
+    media_id: UUID
     status: str
-    processed_filepath: Optional[str] = None
+    output_filepath: Optional[str] = None
     config: Optional[ActivityConfigResponse] = None
 
     class Config:

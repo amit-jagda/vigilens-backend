@@ -9,7 +9,7 @@ class FaceRecognitionService:
     def __init__(self):
         self.apps = {}
 
-    def _lazy_init(self, model_name: str = "buffalo_l"):
+    def _lazy_init(self, model_name: str = "buffalo_s"):
         if model_name not in self.apps:
             # Register HEIF opener to support HEIC format
             register_heif_opener()
@@ -38,7 +38,7 @@ class FaceRecognitionService:
                 )
                 raise e
 
-    def extract_faces(self, image_bytes: bytes, model_name: str = "buffalo_l") -> list[dict]:
+    def extract_faces(self, image_bytes: bytes, model_name: str = "buffalo_s") -> list[dict]:
         """
         Decodes the image from bytes and extracts bounding boxes and embeddings for all detected faces.
         
@@ -85,7 +85,7 @@ class FaceRecognitionService:
             
         return results
 
-    def load_search_embeddings(self, selfie_path: str | None, fallback_embedding: list[float], model_name: str = "buffalo_l") -> list[np.ndarray]:
+    def load_search_embeddings(self, selfie_path: str | None, fallback_embedding: list[float], model_name: str = "buffalo_s") -> list[np.ndarray]:
         """
         Loads all face embeddings from the reference selfie image file if it exists,
         otherwise falls back to the database-stored embedding.
@@ -105,7 +105,7 @@ class FaceRecognitionService:
             group_embeddings = [np.array(fallback_embedding)]
         return group_embeddings
 
-    def extract_faces_from_video(self, video_path: str, interval: float = 1.0, model_name: str = "buffalo_l"):
+    def extract_faces_from_video(self, video_path: str, interval: float = 1.0, model_name: str = "buffalo_s"):
         """
         Generator that processes a video frame-by-frame at given interval,
         detecting and yielding all faces found in the video.
@@ -140,7 +140,7 @@ class FaceRecognitionService:
         target_embeddings: list[np.ndarray],
         threshold: float,
         interval: float = 1.0,
-        model_name: str = "buffalo_l"
+        model_name: str = "buffalo_s"
     ):
         """
         Generator that processes a video frame-by-frame at given interval, 

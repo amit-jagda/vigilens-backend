@@ -107,7 +107,7 @@ async def get_process_history(
     status_code=status.HTTP_200_OK
 )
 async def get_alerts_report(
-    gallery_media_id: Optional[uuid.UUID] = None,
+    media_id: Optional[uuid.UUID] = None,
     activity_type: Optional[str] = None,
     severity: Optional[str] = None,
     current_user: User = Depends(get_current_user),
@@ -120,7 +120,7 @@ async def get_alerts_report(
     service = ActivityService(db)
     alerts = await service.get_alerts_report(
         tenant_id=tenant_id,
-        gallery_media_id=gallery_media_id,
+        gallery_media_id=media_id,
         activity_type=activity_type,
         severity=severity
     )
@@ -139,7 +139,7 @@ async def get_alerts_report(
     status_code=status.HTTP_200_OK
 )
 async def get_alerts_summary(
-    gallery_media_id: Optional[uuid.UUID] = None,
+    media_id: Optional[uuid.UUID] = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -148,7 +148,7 @@ async def get_alerts_summary(
     """
     tenant_id = verify_tenant(current_user)
     service = ActivityService(db)
-    summary_data = await service.get_alerts_summary(tenant_id=tenant_id, gallery_media_id=gallery_media_id)
+    summary_data = await service.get_alerts_summary(tenant_id=tenant_id, gallery_media_id=media_id)
     
     return StandardResponse(
         message="Activity summary report statistics compiled successfully.",
