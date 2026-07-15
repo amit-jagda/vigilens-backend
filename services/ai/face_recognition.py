@@ -9,16 +9,23 @@ class FaceRecognitionService:
     def __init__(self):
         self.apps = {}
 
-    def _lazy_init(self, model_name: str = "buffalo_s"):
+    def _lazy_init(self, model_name: str = "buffalo_l"):
         if model_name not in self.apps:
             # Register HEIF opener to support HEIC format
             register_heif_opener()
             
             try:
                 # Initialize detection and recognition pipeline on CPU
+                import onnxruntime as ort
+                available_providers = ort.get_available_providers()
+                providers = []
+                if "CUDAExecutionProvider" in available_providers:
+                    providers.append("CUDAExecutionProvider")
+                providers.append("CPUExecutionProvider")
+
                 app = FaceAnalysis(
                     name=model_name,
-                    providers=["CPUExecutionProvider"]
+                    providers=providers
                 )
                 # Default det_size=(640, 640) offers the best balance of speed & quality on CPU
                 app.prepare(ctx_id=0, det_size=(640, 640))
@@ -38,7 +45,7 @@ class FaceRecognitionService:
                 )
                 raise e
 
-    def extract_faces(self, image_bytes: bytes, model_name: str = "buffalo_s") -> list[dict]:
+    def extract_faces(self, image_bytes: bytes, model_name: str = "buffalo_l") -> list[dict]:
         """
         Decodes the image from bytes and extracts bounding boxes and embeddings for all detected faces.
         
@@ -85,7 +92,7 @@ class FaceRecognitionService:
             
         return results
 
-    def load_search_embeddings(self, selfie_path: str | None, fallback_embedding: list[float], model_name: str = "buffalo_s") -> list[np.ndarray]:
+    def load_search_embeddings(self, selfie_path: str | None, fallback_embedding: list[float], model_name: str = "buffalo_l") -> list[np.ndarray]:
         """
         Loads all face embeddings from the reference selfie image file if it exists,
         otherwise falls back to the database-stored embedding.
@@ -105,7 +112,7 @@ class FaceRecognitionService:
             group_embeddings = [np.array(fallback_embedding)]
         return group_embeddings
 
-    def extract_faces_from_video(self, video_path: str, interval: float = 1.0, model_name: str = "buffalo_s"):
+    def extract_faces_from_video(self, video_path: str, interval: float = 1.0, model_name: str = "buffalo_l"):
         """
         Generator that processes a video frame-by-frame at given interval,
         detecting and yielding all faces found in the video.
@@ -140,7 +147,7 @@ class FaceRecognitionService:
         target_embeddings: list[np.ndarray],
         threshold: float,
         interval: float = 1.0,
-        model_name: str = "buffalo_s"
+        model_name: str = "buffalo_l"
     ):
         """
         Generator that processes a video frame-by-frame at given interval, 

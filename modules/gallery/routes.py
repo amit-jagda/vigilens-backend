@@ -51,6 +51,14 @@ async def upload_gallery_media(
     for suffix in ["", ":all", ":photo", ":video"]:
         await delete_cached(f"gallery_media_list:{tenant_id}{suffix}")
     
+    # Re-query the created media records to properly load selectin relationships and prevent MissingGreenlet in Pydantic validation
+    from sqlalchemy import select
+    from modules.gallery.model import GalleryMedia
+    media_ids = [m.id for m in media_list]
+    stmt = select(GalleryMedia).where(GalleryMedia.id.in_(media_ids))
+    res = await db.execute(stmt)
+    media_list = list(res.scalars().all())
+    
     media_data = [GalleryMediaResponse.model_validate(m) for m in media_list]
     return StandardResponse(
         message=f"Successfully uploaded {len(media_data)} media file(s) to the gallery.",
