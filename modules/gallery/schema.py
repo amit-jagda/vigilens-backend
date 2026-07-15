@@ -2,6 +2,7 @@ from pydantic import BaseModel
 from uuid import UUID
 from datetime import datetime
 from typing import Optional
+from modules.activity.schema import ActivityConfigResponse
 
 class GalleryMediaBase(BaseModel):
     filename: str
@@ -13,6 +14,7 @@ class GalleryMediaResponse(GalleryMediaBase):
     processed_filepath: Optional[str] = None
     status: str
     created_at: datetime
+    config: Optional[ActivityConfigResponse] = None
 
     class Config:
         from_attributes = True

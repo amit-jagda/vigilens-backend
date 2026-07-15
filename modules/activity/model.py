@@ -36,7 +36,7 @@ class ActivityConfig(BaseModel):
     # Selected custom activity labels to track
     selected_activities: Mapped[Optional[List[str]]] = mapped_column(JSON, nullable=True)
 
-    gallery_media: Mapped["GalleryMedia"] = relationship()
+    gallery_media: Mapped["GalleryMedia"] = relationship(back_populates="config")
 
 
 class ActivityAlert(BaseModel):
