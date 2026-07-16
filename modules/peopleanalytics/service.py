@@ -49,10 +49,10 @@ class PeopleAnalyticsService:
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Gallery media '{item.gallery_media_id}' not found or access denied."
                 )
-            if gallery_media.media_type != "video":
+            if gallery_media.media_type not in {"video", "photo"}:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Gallery media '{item.gallery_media_id}' is not a video file."
+                    detail=f"Gallery media '{item.gallery_media_id}' is not a valid video or photo file."
                 )
             if not os.path.exists(gallery_media.filepath):
                 raise HTTPException(
