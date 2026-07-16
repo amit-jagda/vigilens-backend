@@ -70,7 +70,7 @@ class ObjectCountAnalyzeRequest(BaseModel):
     min_track_frames: int = 100
     track_buffer: int = 150
     gmc_method: str = "none"
-    reid_classes: Optional[List[str]] = ["person"]
+    reid_classes: Optional[List[str]] = None
     imgsz: int = 480
     entry_exit_report: bool = False
     line_coords: Optional[List[List[int]]] = None
