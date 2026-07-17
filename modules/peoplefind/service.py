@@ -272,7 +272,8 @@ class PeopleFindService:
 
         # Find matching faces in DB (scoped to the same tenant_id) for all faces detected in the photo
         try:
-            media_best = {}  # media_source_id -> (similarity, face_embedding)
+            photo_best = {}  # media_source_id -> (similarity, face_embedding)
+            video_best = {}  # (media_source_id, timestamp) -> (similarity, face_embedding)
             
             for face in faces:
                 target_emb = face["embedding"]
@@ -282,20 +283,37 @@ class PeopleFindService:
                     threshold=threshold
                 )
 
-                # De-duplicate matches per photo (only keep highest similarity match per source media item)
+                # Keep all matches for videos (by timestamp) and highest similarity for photos
                 for face_emb, sim in matches:
                     media_id = face_emb.media_source_id
-                    if media_id not in media_best or sim > media_best[media_id][0]:
-                        media_best[media_id] = (sim, face_emb)
+                    media_type = face_emb.media_source.media_type if face_emb.media_source else "photo"
+                    
+                    if media_type == "video":
+                        ts = face_emb.timestamp
+                        key = (media_id, ts)
+                        if key not in video_best or sim > video_best[key][0]:
+                            video_best[key] = (sim, face_emb)
+                    else:
+                        if media_id not in photo_best or sim > photo_best[media_id][0]:
+                            photo_best[media_id] = (sim, face_emb)
 
             # Save confirmed matches in FaceSearchResult table
-            for media_id, (sim, face_emb) in media_best.items():
+            for media_id, (sim, face_emb) in photo_best.items():
                 await self.repo.create_search_result(
                     session_id=session.id,
                     media_source_id=media_id,
                     similarity=sim,
                     bbox=face_emb.bbox,
                     timestamp=face_emb.timestamp
+                )
+
+            for (media_id, ts), (sim, face_emb) in video_best.items():
+                await self.repo.create_search_result(
+                    session_id=session.id,
+                    media_source_id=media_id,
+                    similarity=sim,
+                    bbox=face_emb.bbox,
+                    timestamp=ts
                 )
 
             await self.repo.update_search_session_status(session.id, "completed")
@@ -439,6 +457,47 @@ class PeopleFindService:
             })
             
         return unique_faces
+
+    async def delete_search_session(self, session_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+        """
+        Soft deletes a search session history record and its associated results.
+        """
+        session = await self.repo.get_search_session_by_id(session_id, tenant_id)
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Search session not found or unauthorized access."
+            )
+
+        session.is_delete = True
+        
+        # Soft delete results
+        from sqlalchemy import update
+        from modules.peoplefind.model import FaceSearchResult
+        stmt_results = (
+            update(FaceSearchResult)
+            .where(FaceSearchResult.session_id == session_id)
+            .values(is_delete=True)
+        )
+        await self.db.execute(stmt_results)
+        
+        # Delete physical files
+        from services.storage import storage_client
+        if session.selfie_path:
+            try:
+                storage_client.delete_file(session.selfie_path)
+            except Exception:
+                pass
+
+        import shutil
+        session_out_dir = os.path.join("storage", "video_matches", str(session.id))
+        if os.path.exists(session_out_dir):
+            try:
+                shutil.rmtree(session_out_dir)
+            except Exception:
+                pass
+
+        await self.db.commit()
 
     @classmethod
     async def migrate_existing_heic(cls):
