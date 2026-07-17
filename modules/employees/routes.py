@@ -14,6 +14,8 @@ from modules.employees.schema import EmployeeResponse, EmployeeAttendanceRespons
 from modules.peopleanalytics.schema import UploadedVideoResponse, PeopleAnalyticsSessionResponse
 
 
+from shared.utils.validation import validate_name, validate_employee_code
+
 router = APIRouter(prefix="/employees", tags=["Employee Registry"])
 
 
@@ -44,6 +46,12 @@ async def register_new_employee(
     Registers a new employee, uploads their picture, extracts visual ReID embeddings, and stores them.
     """
     tenant_id = verify_tenant(current_user)
+    
+    # Run input validations
+    first_name = validate_name(first_name, "First name")
+    last_name = validate_name(last_name, "Last name")
+    employee_code = validate_employee_code(employee_code)
+
     service = EmployeeService(db)
     employee = await service.register_employee(
         tenant_id=tenant_id,
@@ -146,6 +154,15 @@ async def update_employee_profile(
     Updates employee profile details. Re-extracts visual embeddings if a new photo file is provided.
     """
     tenant_id = verify_tenant(current_user)
+
+    # Validate inputs if supplied
+    if first_name is not None:
+        first_name = validate_name(first_name, "First name")
+    if last_name is not None:
+        last_name = validate_name(last_name, "Last name")
+    if employee_code is not None:
+        employee_code = validate_employee_code(employee_code)
+
     service = EmployeeService(db)
     employee = await service.update_employee(
         employee_id=employee_id,
