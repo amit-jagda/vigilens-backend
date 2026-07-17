@@ -201,11 +201,12 @@ class PeopleFindRepository:
         # similarity >= threshold  -->  cosine_distance <= 1 - threshold
         distance_limit = 1.0 - threshold
         
-        # Define similarity expression
         similarity_expr = (1.0 - FaceEmbedding.embedding.cosine_distance(target_embedding)).label("similarity")
-
+        
+        from sqlalchemy.orm import selectinload
         stmt = (
             select(FaceEmbedding, similarity_expr)
+            .options(selectinload(FaceEmbedding.media_source))
             .join(MediaSource, FaceEmbedding.media_source_id == MediaSource.id)
             .where(
                 MediaSource.tenant_id == tenant_id,
