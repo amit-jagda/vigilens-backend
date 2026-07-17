@@ -19,6 +19,7 @@ from modules.peopleanalytics.schema import (
     VisitorAttendanceResponse,
     RegisterVisitorRequest
 )
+from shared.utils.validation import validate_name, validate_employee_code
 
 router = APIRouter(prefix="/peopleanalytics", tags=["CCTV People Analytics & Attendance"])
 
@@ -265,6 +266,19 @@ async def register_visitor_or_convert_to_employee(
     Registers a visitor (updates visitor details) or converts a visitor to an employee.
     """
     tenant_id = verify_tenant(current_user)
+
+    # Run input validations
+    data.first_name = validate_name(data.first_name, "First name")
+    data.last_name = validate_name(data.last_name, "Last name")
+    
+    if data.registration_type == "employee":
+        if not data.employee_code:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Employee code is required when converting a visitor to an employee."
+            )
+        data.employee_code = validate_employee_code(data.employee_code)
+
     service = PeopleAnalyticsService(db)
     result = await service.register_visitor_or_convert_to_employee(tenant_id, data)
     return StandardResponse(

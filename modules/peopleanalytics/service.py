@@ -159,8 +159,8 @@ class PeopleAnalyticsService:
             )
         
         video_path, output_video_path, crop_paths = res
-        # Remove physical files
-        all_paths = [video_path, output_video_path] + crop_paths
+        # Remove physical files (keeping raw video_path intact as it belongs to global gallery_media)
+        all_paths = [output_video_path] + crop_paths
         for path in all_paths:
             if path and os.path.exists(path):
                 try:
