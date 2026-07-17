@@ -164,7 +164,7 @@ def index_objectcount_task(
             classes_to_track = configs.get("classes_to_track")
             classify_vehicle = configs.get("classify_vehicle", False)
             classify_gender = configs.get("classify_gender", False)
-            reid_classes = configs.get("reid_classes", ["person"])
+            reid_classes = configs.get("reid_classes")
             imgsz = configs.get("imgsz", 640)
 
             if media_type == "photo":
@@ -228,9 +228,6 @@ def index_objectcount_task(
                         
                         if classes_to_track and class_name not in classes_to_track:
                             continue
-                            
-                        if not classify_vehicle and class_name in vehicle_classes:
-                            class_name = "vehicle"
                             
                         detected_counts[class_name] = detected_counts.get(class_name, 0) + 1
                         total_detected += 1
@@ -451,9 +448,6 @@ def index_objectcount_task(
                             if classes_to_track and class_name not in classes_to_track:
                                 continue
                                 
-                            if not classify_vehicle and class_name in vehicle_classes:
-                                class_name = "vehicle"
-                                
                             conf = float(box.conf[0].item())
                             xyxy = box.xyxy[0].cpu().numpy().tolist()
                             detections.append({
@@ -483,7 +477,7 @@ def index_objectcount_task(
                             # Only extract ReID features for specified classes (e.g. person)
                             # osnet is a person-ReID model, applying it to vehicles produces
                             # garbage features that corrupt tracking association
-                            if reid_classes and det["class_name"] not in reid_classes:
+                            if not reid_classes or det["class_name"] not in reid_classes:
                                 det["feature"] = None
                                 continue
 

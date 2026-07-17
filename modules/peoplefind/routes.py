@@ -293,6 +293,35 @@ async def get_search_session_matches(
     )
 
 
+@router.delete(
+    "/sessions/{session_id}",
+    response_model=StandardResponse[None],
+    status_code=status.HTTP_200_OK
+)
+async def delete_search_session_endpoint(
+    session_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Deletes (soft deletes) a search session history record and its associated results.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = PeopleFindService(db)
+    await service.delete_search_session(session_id, tenant_id)
+    
+    # Invalidate session history cache for this tenant
+    await clear_cache_by_pattern(f"sessions_history:{tenant_id}:*")
+    # Also delete cached session matches
+    await delete_cached(f"session_matches:{session_id}")
+    
+    return StandardResponse(
+        message="Search session deleted successfully.",
+        status=status.HTTP_200_OK,
+        data=None
+    )
+
+
 @router.get(
     "/sessions/{session_id}/status",
     response_model=StandardResponse[SearchSessionResponse],
