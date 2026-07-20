@@ -21,6 +21,16 @@ from modules.objectcount.reid_model import ReIDExtractor
 from ultralytics import YOLO
 from retinaface import RetinaFace
 from shared.utils.video_format import videoFormatChanger
+import onnxruntime as ort
+
+try:
+    available_providers = ort.get_available_providers()
+except Exception:
+    available_providers = []
+
+# Default to ONNX on CPU, RetinaFace on GPU
+FACE_DETECTOR_TYPE = "retinaface" if "CUDAExecutionProvider" in available_providers else "onnx"
+logger.info(f"Dynamic Face Detector Type resolved: {FACE_DETECTOR_TYPE}")
 
 def crop_and_align_face(image, bbox, landmarks=None, padding=0.25, target_size=(96, 96)):
     """
@@ -55,6 +65,131 @@ def crop_and_align_face(image, bbox, landmarks=None, padding=0.25, target_size=(
             return np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8)
             
     return cv2.resize(crop, target_size, interpolation=cv2.INTER_AREA)
+
+def detect_faces_optimized(image, max_dim=160):
+    """
+    Runs RetinaFace face detection on a downscaled version of the image to speed up CPU inference.
+    Maps the returned facial area and landmarks back to the original image scale.
+    """
+    if image is None or image.size == 0:
+        return {}
+        
+    h, w = image.shape[:2]
+    largest_dim = max(h, w)
+    
+    if largest_dim <= max_dim:
+        try:
+            return RetinaFace.detect_faces(image)
+        except Exception as e:
+            logger.error(f"RetinaFace detect_faces failed on original image: {e}")
+            return {}
+        
+    scale = max_dim / largest_dim
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    
+    if new_w <= 0 or new_h <= 0:
+        return {}
+        
+    resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    
+    try:
+        faces = RetinaFace.detect_faces(resized)
+    except Exception as e:
+        logger.error(f"RetinaFace detect_faces failed on resized image: {e}")
+        return {}
+        
+    if not faces or not isinstance(faces, dict):
+        return faces
+        
+    # Map coordinates back to original size
+    mapped_faces = {}
+    for face_key, face_data in faces.items():
+        facial_area = face_data.get("facial_area")
+        landmarks = face_data.get("landmarks", {})
+        
+        mapped_face_data = face_data.copy()
+        
+        if facial_area and len(facial_area) == 4:
+            fx1, fy1, fx2, fy2 = facial_area
+            mapped_facial_area = [
+                int(fx1 / scale),
+                int(fy1 / scale),
+                int(fx2 / scale),
+                int(fy2 / scale)
+            ]
+            mapped_face_data["facial_area"] = mapped_facial_area
+            
+        if landmarks:
+            mapped_landmarks = {}
+            for kp_name, kp_pos in landmarks.items():
+                kp_x, kp_y = kp_pos
+                mapped_landmarks[kp_name] = [kp_x / scale, kp_y / scale]
+            mapped_face_data["landmarks"] = mapped_landmarks
+            
+        mapped_faces[face_key] = mapped_face_data
+        
+    return mapped_faces
+
+_onnx_face_detector = None
+
+def get_onnx_face_detector():
+    global _onnx_face_detector
+    if _onnx_face_detector is None:
+        from insightface.app import FaceAnalysis
+        import onnxruntime as ort
+        available_providers = ort.get_available_providers()
+        providers = []
+        if "CUDAExecutionProvider" in available_providers:
+            providers.append("CUDAExecutionProvider")
+        providers.append("CPUExecutionProvider")
+        
+        try:
+            app = FaceAnalysis(name="buffalo_l", providers=providers)
+            app.prepare(ctx_id=0, det_size=(640, 640))
+            _onnx_face_detector = app
+        except Exception as e:
+            logger.error(f"Failed to initialize InsightFace FaceAnalysis for ONNX: {e}")
+            raise e
+    return _onnx_face_detector
+
+def detect_faces_onnx(image):
+    if image is None or image.size == 0:
+        return {}
+        
+    try:
+        app = get_onnx_face_detector()
+        faces = app.get(image)
+    except Exception as e:
+        logger.error(f"ONNX face detection failed: {e}")
+        return {}
+        
+    if not faces:
+        return {}
+        
+    retina_faces = {}
+    for idx, face in enumerate(faces):
+        x1, y1, x2, y2 = [int(val) for val in face.bbox]
+        
+        landmarks = {}
+        if getattr(face, "kps", None) is not None:
+            kps = face.kps.tolist()
+            # InsightFace landmarks mapping: eye_left, eye_right, nose, mouth_left, mouth_right
+            landmarks = {
+                "left_eye": kps[0],
+                "right_eye": kps[1],
+                "nose": kps[2],
+                "mouth_left": kps[3],
+                "mouth_right": kps[4]
+            }
+            
+        retina_faces[f"face_{idx + 1}"] = {
+            "facial_area": [x1, y1, x2, y2],
+            "landmarks": landmarks,
+            "score": float(face.det_score) if hasattr(face, "det_score") else 1.0
+        }
+        
+    return retina_faces
 
 def run_async(coro):
     """Utility helper to run async coroutines inside synchronous Celery tasks."""
@@ -99,6 +234,16 @@ def index_objectcount_task(
             import torch
             
             repo = ObjectCountRepository(db)
+            
+            async def set_progress(pct: int):
+                try:
+                    import redis.asyncio as aioredis
+                    from configs.base import settings
+                    r_client = aioredis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+                    await r_client.setex(f"objectcount:progress:{media_id}", 3600, str(pct))
+                    await r_client.close()
+                except Exception as re_err:
+                    logger.error(f"Failed to update progress in Redis: {re_err}")
             
             # Load weights using self-healing loader
             from shared.utils.model_loader import get_model_path
@@ -168,6 +313,7 @@ def index_objectcount_task(
             imgsz = configs.get("imgsz", 640)
 
             if media_type == "photo":
+                await set_progress(20)
                 # Decode image using Pillow for maximum compatibility (HEIC, PNG, JPEG, WEBP, etc.)
                 from PIL import Image
                 import io
@@ -194,7 +340,13 @@ def index_objectcount_task(
                     return
                 
                 # YOLO detection
+                import time
+                start_yolo = time.perf_counter()
+                await set_progress(30)
                 results = model(frame, conf=confidence_threshold, iou=0.5, imgsz=imgsz, device=device, verbose=False)
+                await set_progress(50 if classify_gender else 80)
+                end_yolo = time.perf_counter()
+                logger.info(f"[PROFILER] YOLO detection took: {end_yolo - start_yolo:.4f} seconds")
                 
                 detected_counts = {}
                 total_detected = 0
@@ -219,10 +371,15 @@ def index_objectcount_task(
                 
                 annotated_frame = frame.copy()
                 
+                total_retina_time = 0.0
+                total_onnx_time = 0.0
+                face_detection_count = 0
+                
                 if results:
                     result = results[0]
                     boxes = result.boxes
-                    for box in boxes:
+                    num_boxes = len(boxes)
+                    for box_idx, box in enumerate(boxes):
                         cls_id = int(box.cls[0].item())
                         class_name = model.names.get(cls_id, "unknown")
                         
@@ -256,7 +413,17 @@ def index_objectcount_task(
                                 
                                 if upper_body_crop.size > 0:
                                     try:
-                                        faces = RetinaFace.detect_faces(upper_body_crop)
+                                        start_retina = time.perf_counter()
+                                        if FACE_DETECTOR_TYPE == "onnx":
+                                            faces = detect_faces_onnx(upper_body_crop)
+                                        else:
+                                            faces = detect_faces_optimized(upper_body_crop)
+                                        end_retina = time.perf_counter()
+                                        retina_dur = end_retina - start_retina
+                                        total_retina_time += retina_dur
+                                        face_detection_count += 1
+                                        logger.info(f"[PROFILER] RetinaFace (Person #{box_idx}) took: {retina_dur:.4f} seconds")
+                                        
                                         if faces and isinstance(faces, dict):
                                             face_key = list(faces.keys())[0]
                                             face_data = faces[face_key]
@@ -268,7 +435,13 @@ def index_objectcount_task(
                                                 
                                                 face_crop = crop_and_align_face(upper_body_crop, [fx1, fy1, fx2, fy2], landmarks, padding=0.25)
                                                 if gender_classifier is not None:
+                                                    start_onnx = time.perf_counter()
                                                     gender_res = gender_classifier.predict(face_crop)
+                                                    end_onnx = time.perf_counter()
+                                                    onnx_dur = end_onnx - start_onnx
+                                                    total_onnx_time += onnx_dur
+                                                    logger.info(f"[PROFILER] ONNX Gender Classifier (Person #{box_idx}) took: {onnx_dur:.4f} seconds")
+                                                    
                                                     resolved_gender = gender_res["gender"]
                                                     resolved_gender_conf = gender_res["confidence"]
                                                     
@@ -322,7 +495,17 @@ def index_objectcount_task(
                             start_time=0.0,
                             end_time=0.0
                         )
+                        if classify_gender and num_boxes > 0 and (box_idx % 5 == 0 or box_idx == num_boxes - 1):
+                            await set_progress(50 + int((box_idx / num_boxes) * 30))
                 
+                logger.info(
+                    f"[PROFILER] TOTAL SUMMARY:\n"
+                    f"  - Total RetinaFace calls: {face_detection_count}\n"
+                    f"  - Cumulative RetinaFace time: {total_retina_time:.4f} seconds\n"
+                    f"  - Cumulative ONNX Gender time: {total_onnx_time:.4f} seconds"
+                )
+                
+                await set_progress(90)
                 # Save annotated frame to disk
                 out_filename = f"processed_{media_id}.jpg"
                 processed_filepath = os.path.join("storage", "objectcount_outputs", out_filename)
@@ -331,6 +514,7 @@ def index_objectcount_task(
                 
                 # Upload annotated frame to S3
                 storage_client.upload_file(processed_filepath, processed_filepath)
+                await set_progress(95)
                 
                 report_summary = {
                     "total_unique_objects": total_detected,
@@ -426,14 +610,7 @@ def index_objectcount_task(
                         logger.info(f"Processing frame {frame_idx}/{total_frames}...")
                         if total_frames > 0:
                             progress = int((frame_idx / total_frames) * 100)
-                            try:
-                                import redis.asyncio as aioredis
-                                from configs.base import settings
-                                r_client = aioredis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
-                                await r_client.setex(f"objectcount:progress:{media_id}", 3600, str(progress))
-                                await r_client.close()
-                            except Exception as re_err:
-                                logger.error(f"Failed to update progress in Redis: {re_err}")
+                            await set_progress(progress)
                     
                     results = model(frame, conf=0.10, iou=0.5, imgsz=imgsz, device=device, verbose=False)
                     detections = []
@@ -560,7 +737,10 @@ def index_objectcount_task(
                                                 
                                                 # Use RetinaFace detector to find faces in the head region
                                                 try:
-                                                    faces = RetinaFace.detect_faces(head_crop)
+                                                    if FACE_DETECTOR_TYPE == "onnx":
+                                                        faces = detect_faces_onnx(head_crop)
+                                                    else:
+                                                        faces = detect_faces_optimized(head_crop)
                                                 except Exception as e:
                                                     logger.error(f"RetinaFace detection failed: {e}")
                                                     faces = {}
