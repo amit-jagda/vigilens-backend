@@ -431,6 +431,18 @@ async def _process_video_job(
             progress = int((frame_idx / total_frames) * 100) if total_frames > 0 else 0
             frames_left = total_frames - frame_idx
             logger.info(f"Session {session.id} - Processing frame {frame_idx}/{total_frames} ({progress}% completed, {frames_left} frames left)...")
+            
+            # Save progress to Redis
+            try:
+                from database.redis import get_redis_client, init_redis
+                r_client = get_redis_client()
+                if r_client is None:
+                    await init_redis()
+                    r_client = get_redis_client()
+                if r_client:
+                    await r_client.setex(f"peopleanalytics:progress:{session.id}", 3600, str(progress))
+            except Exception as re_err:
+                logger.error(f"Failed to update progress in Redis: {re_err}")
 
         timestamp_sec = frame_idx / fps
         frame_idx += 1

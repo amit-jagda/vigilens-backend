@@ -55,6 +55,8 @@ class PeopleAnalyticsSessionResponse(BaseModel):
     
     occupancy_timeline: Optional[List[dict]] = None
     
+    completed_percentage: int = 0
+    
     created_at: datetime
     completed_at: Optional[datetime] = None
 
