@@ -126,6 +126,24 @@ class PeopleAnalyticsService:
                 detail="Analytics session not found or unauthorized access."
             )
         
+        # Calculate progress
+        progress = 0
+        if session.status == "completed":
+            progress = 100
+        elif session.status == "failed":
+            progress = 0
+        else:
+            from database.redis import get_redis_client
+            redis_client = get_redis_client()
+            if redis_client:
+                try:
+                    val = await redis_client.get(f"peopleanalytics:progress:{session.id}")
+                    if val is not None:
+                        progress = int(val)
+                except Exception:
+                    progress = 0
+        session.completed_percentage = progress
+
         # Fetch first-time visitors and attach to session
         first_time_occs = await self.repo.get_session_first_time_visitors(session_id)
         from collections import defaultdict
@@ -147,7 +165,28 @@ class PeopleAnalyticsService:
         return session
 
     async def get_all_sessions(self, tenant_id: uuid.UUID) -> List[PeopleAnalyticsSession]:
-        return await self.repo.get_all_sessions(tenant_id)
+        sessions = await self.repo.get_all_sessions(tenant_id)
+        
+        from database.redis import get_redis_client
+        redis_client = get_redis_client()
+
+        for session in sessions:
+            progress = 0
+            if session.status == "completed":
+                progress = 100
+            elif session.status == "failed":
+                progress = 0
+            else:
+                if redis_client:
+                    try:
+                        val = await redis_client.get(f"peopleanalytics:progress:{session.id}")
+                        if val is not None:
+                            progress = int(val)
+                    except Exception:
+                        progress = 0
+            session.completed_percentage = progress
+
+        return sessions
 
     async def delete_session(self, session_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
         # Soft delete in database
