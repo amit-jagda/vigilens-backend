@@ -3,6 +3,66 @@ from uuid import UUID
 from datetime import datetime
 from typing import Optional, List, Dict
 
+class PlateDetection(BaseModel):
+    plate_text: str
+    confidence: float
+    ocr_confidence: float = 0.85
+    first_seen: float
+    last_seen: float
+    total_appearances: int
+    bbox_sample: Optional[List[int]] = None
+    thumbnail_path: Optional[str] = None
+
+
+class NumberplateReport(BaseModel):
+    total_unique_plates: int
+    plates: List[PlateDetection] = []
+    most_frequent_plate: Optional[str] = None
+    detection_timeline: List[Dict] = []
+
+
+class DamageZone(BaseModel):
+    damage_class: str
+    severity_score: float
+    affected_area_pct: float = 0.0
+    confidence: float
+    first_seen: float
+    last_seen: float
+    thumbnail_path: Optional[str] = None
+
+
+class DamageReport(BaseModel):
+    overall_condition: str
+    overall_severity_score: float
+    total_damage_zones: int
+    damage_breakdown: Dict[str, int] = {}
+    zones: List[DamageZone] = []
+    inspection_verdict: str
+    verdict_reason: str
+
+
+class PersonPPEStatus(BaseModel):
+    person_id: int
+    is_compliant: bool
+    detected_ppe: List[str] = []
+    missing_ppe: List[str] = []
+    compliance_score: float = 1.0
+    first_seen: float
+    last_seen: float
+    thumbnail_path: Optional[str] = None
+
+
+class PPEReport(BaseModel):
+    total_persons_detected: int
+    compliant_count: int
+    non_compliant_count: int
+    compliance_rate_pct: float
+    ppe_item_stats: Dict[str, int] = {}
+    persons: List[PersonPPEStatus] = []
+    violation_timestamps: List[Dict] = []
+    required_ppe: List[str] = []
+
+
 class ObjectCountResultResponse(BaseModel):
     id: UUID
     media_id: UUID
@@ -26,12 +86,18 @@ class ObjectCountMediaResponse(BaseModel):
     status: str
     classify_gender: bool
     classify_vehicle: bool
+    detect_numberplate: bool = False
+    detect_damage_parcel: bool = False
+    detect_ppe: bool = False
     classes_to_track: Optional[List[str]] = None
     total_objects_count: Optional[int] = None
     peak_objects_count: Optional[int] = None
     average_objects_count: Optional[float] = None
     video_duration_seconds: Optional[float] = None
     report_summary: Optional[Dict] = None
+    numberplate_results: Optional[Dict] = None
+    damage_results: Optional[Dict] = None
+    ppe_results: Optional[Dict] = None
     progress_percentage: int = 0
     created_at: datetime
 
@@ -66,6 +132,10 @@ class ObjectCountAnalyzeRequest(BaseModel):
     classes_to_track: Optional[List[str]] = None
     classify_gender: bool = False
     classify_vehicle: bool = False
+    detect_numberplate: bool = False
+    detect_damage_parcel: bool = False
+    detect_ppe: bool = False
+    required_ppe_items: Optional[List[str]] = None
     confidence_threshold: float = 0.35
     min_track_frames: int = 100
     track_buffer: int = 150

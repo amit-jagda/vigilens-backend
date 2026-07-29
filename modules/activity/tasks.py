@@ -219,13 +219,18 @@ def process_activity_media_task(media_id_str: str, interval: float = 0.033):
                         # Save main output image
                         cv2.imwrite(output_filepath, img_annotated)
                 else:
-                    # For videos, call the TF video processing generator
-                    for alert in activity_detection_service.process_video_tf(
+                    # For videos, call process_video generator with occupancy & tracking parameters
+                    for alert in activity_detection_service.process_video(
                         video_path=media.filepath,
                         output_video_path=output_filepath,
                         polygon_points=polygon_points,
-                        selected_activities=selected_activities,
                         detect_fall=detect_fall,
+                        detect_aggression=detect_aggression,
+                        detect_intrusion=detect_intrusion,
+                        detect_loitering=detect_loitering,
+                        loitering_threshold=loitering_threshold,
+                        detect_occupancy=detect_occupancy,
+                        occupancy_limit=occupancy_limit,
                         detect_sleeping=detect_sleeping,
                         detect_walking=detect_walking,
                         interval=interval

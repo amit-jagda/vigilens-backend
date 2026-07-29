@@ -19,6 +19,9 @@ class ObjectCountMedia(BaseModel):
     # Tracking options used for the latest analysis
     classify_gender: Mapped[bool] = mapped_column(default=False, server_default="false")
     classify_vehicle: Mapped[bool] = mapped_column(default=False, server_default="false")
+    detect_numberplate: Mapped[bool] = mapped_column(default=False, server_default="false")
+    detect_damage_parcel: Mapped[bool] = mapped_column(default=False, server_default="false")
+    detect_ppe: Mapped[bool] = mapped_column(default=False, server_default="false")
     classes_to_track: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     
     # Analysis metrics
@@ -29,6 +32,9 @@ class ObjectCountMedia(BaseModel):
     
     # Detailed counts and breakdown report as JSON
     report_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    numberplate_results: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    damage_results: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    ppe_results: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Relationships
     gallery_media: Mapped["GalleryMedia"] = relationship()

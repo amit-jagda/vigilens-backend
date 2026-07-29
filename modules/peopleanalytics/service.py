@@ -224,23 +224,60 @@ class PeopleAnalyticsService:
         # 2. Get all visitor occurrences in this session
         occurrences = await self.repo.get_session_occurrences(session_id)
 
-        # 3. Get all employee attendance logs in this session (reusing the new employee service method)
-        from modules.employees.service import EmployeeService
-        emp_service = EmployeeService(self.db)
-        attendance_logs = await emp_service.get_session_attendance(session_id, tenant_id)
+        # 3. Get all employee detections for this session
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+        from modules.peopleanalytics.model import EmployeeSessionDetection, EmployeeAttendanceLog
+
+        stmt_emp_det = (
+            select(EmployeeSessionDetection)
+            .options(selectinload(EmployeeSessionDetection.employee))
+            .where(
+                EmployeeSessionDetection.session_id == session_id,
+                EmployeeSessionDetection.is_delete == False
+            )
+        )
+        res_emp_det = await self.db.execute(stmt_emp_det)
+        emp_dets = res_emp_det.scalars().all()
 
         people = []
+        seen_emp_ids = set()
 
-        # Add employees
-        for log in attendance_logs:
-            people.append(SessionDetectedPerson(
-                identity_id=log.employee_id,
-                type="employee",
-                name=f"{log.employee.first_name} {log.employee.last_name}",
-                photo_path=log.employee.photo_path,
-                first_seen=log.first_seen,
-                last_seen=log.last_seen
-            ))
+        # Add employees from EmployeeSessionDetection
+        for det in emp_dets:
+            if det.employee and not det.employee.is_delete:
+                seen_emp_ids.add(det.employee_id)
+                people.append(SessionDetectedPerson(
+                    identity_id=det.employee_id,
+                    type="employee",
+                    name=f"{det.employee.first_name} {det.employee.last_name}",
+                    photo_path=det.employee.photo_path,
+                    first_seen=det.first_seen,
+                    last_seen=det.last_seen
+                ))
+
+        # Fallback: check EmployeeAttendanceLog for any converted employees
+        stmt_emp_log = (
+            select(EmployeeAttendanceLog)
+            .options(selectinload(EmployeeAttendanceLog.employee))
+            .where(
+                EmployeeAttendanceLog.session_id == session_id,
+                EmployeeAttendanceLog.is_delete == False
+            )
+        )
+        res_emp_log = await self.db.execute(stmt_emp_log)
+        emp_logs = res_emp_log.scalars().all()
+        for log in emp_logs:
+            if log.employee_id not in seen_emp_ids and log.employee and not log.employee.is_delete:
+                seen_emp_ids.add(log.employee_id)
+                people.append(SessionDetectedPerson(
+                    identity_id=log.employee_id,
+                    type="employee",
+                    name=f"{log.employee.first_name} {log.employee.last_name}",
+                    photo_path=log.employee.photo_path,
+                    first_seen=log.first_seen,
+                    last_seen=log.last_seen
+                ))
 
         # Add visitors
         for occ in occurrences:
@@ -291,15 +328,18 @@ class PeopleAnalyticsService:
         if not identity:
             raise HTTPException(
                 status_code=404,
-                detail="Visitor identity not found."
+                detail="Visitor identity not found or already deleted."
             )
 
         if data.registration_type == "visitor":
-            # Just update first_name & last_name
+            # Update visitor name details
             identity.first_name = data.first_name
             identity.last_name = data.last_name
             await self.db.commit()
-            return {"message": "Visitor registered successfully.", "type": "visitor"}
+            return {
+                "message": f"Visitor name updated to '{data.first_name} {data.last_name}'.",
+                "type": "visitor"
+            }
 
         elif data.registration_type == "employee":
             # 1. Verify employee code is unique under this tenant
@@ -312,7 +352,7 @@ class PeopleAnalyticsService:
                     detail=f"Employee code '{data.employee_code}' is already registered."
                 )
 
-            # 2. Get photo path (crop_path from first occurrence)
+            # 2. Extract best crop photo path from occurrences
             crop_path = None
             for occ in identity.occurrences:
                 if occ.crop_path:
@@ -352,7 +392,7 @@ class PeopleAnalyticsService:
 
             # 5. Create new Employee
             from modules.employees.model import Employee, EmployeeEmbedding
-            from modules.peopleanalytics.model import EmployeeAttendanceLog, VisitorAttendanceLog
+            from modules.peopleanalytics.model import EmployeeAttendanceLog, VisitorAttendanceLog, EmployeeSessionDetection
             
             employee = Employee(
                 id=uuid.uuid4(),
@@ -373,7 +413,7 @@ class PeopleAnalyticsService:
             )
             self.db.add(emp_emb)
 
-            # 6. Migrate VisitorAttendanceLog records to EmployeeAttendanceLog
+            # 6. Migrate VisitorAttendanceLog records to EmployeeAttendanceLog and EmployeeSessionDetection
             stmt_logs = select(VisitorAttendanceLog).where(
                 VisitorAttendanceLog.identity_id == identity.id,
                 VisitorAttendanceLog.is_delete == False
@@ -394,6 +434,16 @@ class PeopleAnalyticsService:
                     update_at=v_log.update_at
                 )
                 self.db.add(emp_log)
+
+                if v_log.session_id:
+                    emp_det = EmployeeSessionDetection(
+                        session_id=v_log.session_id,
+                        employee_id=employee.id,
+                        first_seen=v_log.first_seen,
+                        last_seen=v_log.last_seen,
+                        occurrence_count=v_log.occurrence_count
+                    )
+                    self.db.add(emp_det)
                 
             # 7. Delete visitor data (cascades embeddings, occurrences, visitor attendance logs, crossing logs)
             await self.db.delete(identity)
@@ -408,4 +458,3 @@ class PeopleAnalyticsService:
                 "message": f"Visitor successfully registered as Employee ({data.employee_code}) and visitor logs converted.",
                 "type": "employee"
             }
-
