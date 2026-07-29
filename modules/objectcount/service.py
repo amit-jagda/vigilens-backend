@@ -1,11 +1,14 @@
 import os
 import uuid
+import logging
 from typing import List, Optional
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from modules.objectcount.repository import ObjectCountRepository
 from modules.objectcount.model import ObjectCountMedia, ObjectCountResult
 from modules.objectcount.schema import ObjectCountAnalyzeRequest
+
+logger = logging.getLogger(__name__)
 
 OBJECTCOUNT_OUTPUTS_DIR = os.path.join("storage", "objectcount_outputs")
 os.makedirs(OBJECTCOUNT_OUTPUTS_DIR, exist_ok=True)
@@ -41,6 +44,9 @@ class ObjectCountService:
             gallery_media_id=gallery_media_id,
             classify_gender=configs.classify_gender,
             classify_vehicle=configs.classify_vehicle,
+            detect_numberplate=configs.detect_numberplate,
+            detect_damage_parcel=configs.detect_damage_parcel,
+            detect_ppe=configs.detect_ppe,
             classes_to_track=configs.classes_to_track
         )
         await self.db.commit()
@@ -64,6 +70,12 @@ class ObjectCountService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to submit object tracking task: {str(e)}"
             )
+
+        logger.info(
+            f"[ObjectCountService] Triggered analysis session={analysis.id} for gallery_media_id={gallery_media_id}\n"
+            f"  configs={configs.model_dump()}"
+        )
+        print(f"[ObjectCountService] Triggered analysis session={analysis.id} | configs={configs.model_dump()}")
 
         # Return session with eager loaded gallery media
         return await self.repo.get_media_by_id(analysis.id, tenant_id)
@@ -112,6 +124,18 @@ class ObjectCountService:
                 except Exception:
                     progress = 0
         media.progress_percentage = progress
+
+        logger.info(
+            f"[ObjectCountService] Retreived media details for session={media_id}:\n"
+            f"  - status={media.status}\n"
+            f"  - numberplate_results={media.numberplate_results}\n"
+            f"  - damage_results={media.damage_results}\n"
+            f"  - ppe_results={media.ppe_results}"
+        )
+        print(
+            f"[ObjectCountService] Retreived media details for session={media_id} | status={media.status} | "
+            f"np={media.numberplate_results} | dmg={media.damage_results} | ppe={media.ppe_results}"
+        )
         return media
 
     async def get_media_results(self, media_id: uuid.UUID, tenant_id: uuid.UUID) -> List[ObjectCountResult]:

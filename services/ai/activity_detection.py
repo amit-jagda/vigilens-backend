@@ -282,6 +282,7 @@ class ActivityDetectionService:
     def process_video(
         self,
         video_path: str,
+        output_video_path: Optional[str] = None,
         polygon_points: Optional[List[List[int]]] = None,
         detect_fall: bool = True,
         detect_aggression: bool = True,
@@ -313,29 +314,43 @@ class ActivityDetectionService:
         if polygon_points and len(polygon_points) >= 3:
             polygon_np = np.array(polygon_points, dtype=np.int32)
 
+        # Set up VideoWriter if output_video_path is provided
+        writer = None
+        if output_video_path:
+            os.makedirs(os.path.dirname(output_video_path), exist_ok=True)
+            cap_meta = cv2.VideoCapture(video_path)
+            w_vid = int(cap_meta.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h_vid = int(cap_meta.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps_vid = cap_meta.get(cv2.CAP_PROP_FPS)
+            cap_meta.release()
+            if w_vid > 0 and h_vid > 0:
+                output_fps = max(1, int(1.0 / interval)) if interval > 0 else int(fps_vid if fps_vid > 0 else 30)
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                writer = cv2.VideoWriter(output_video_path, fourcc, output_fps, (w_vid, h_vid))
+
         extractor = VideoFrameExtractor(video_path, interval_seconds=interval)
-        for frame_small, frame, sec, scale in extractor.extract_frames():
-            h_orig, w_orig = frame.shape[:2]
-            
-            # Run YOLO track with persist=True to track IDs
-            results = self.model.track(frame_small, persist=True, verbose=False)
-            
-            if not results or len(results) == 0 or results[0].boxes is None:
-                continue
+        try:
+            for frame_small, frame, sec, scale in extractor.extract_frames():
+                h_orig, w_orig = frame.shape[:2]
+                frame_annotated = frame.copy()
+                
+                # Run YOLO track with persist=True to track IDs
+                results = self.model.track(frame_small, persist=True, verbose=False)
+                
+                if not results or len(results) == 0 or results[0].boxes is None or results[0].boxes.id is None:
+                    if writer is not None:
+                        writer.write(frame_annotated)
+                    continue
 
-            boxes = results[0].boxes
-            keypoints_obj = results[0].keypoints
-            
-            if boxes.id is None:
-                continue
-
-            track_ids = boxes.id.cpu().numpy().astype(int)
-            current_detections = []
-            
-            # Prune loitering tracker for disappeared IDs to free memory
-            disappeared_ids = set(loitering_tracker.entry_times.keys()) - set(track_ids)
-            for d_id in disappeared_ids:
-                loitering_tracker.reset_track(d_id)
+                boxes = results[0].boxes
+                keypoints_obj = results[0].keypoints
+                track_ids = boxes.id.cpu().numpy().astype(int)
+                current_detections = []
+                
+                # Prune loitering tracker for disappeared IDs to free memory
+                disappeared_ids = set(loitering_tracker.entry_times.keys()) - set(track_ids)
+                for d_id in disappeared_ids:
+                    loitering_tracker.reset_track(d_id)
 
             for idx, track_id in enumerate(track_ids):
                 # Get bounding box in frame_small coordinates and restore to full size
@@ -609,21 +624,49 @@ class ActivityDetectionService:
                             "frame": frame
                         }
 
-            # Occupancy Limit Alert (Run at the end of the frame)
+            # Occupancy Limit Alert & Frame Annotation
+            person_centers = [det["center"] for det in current_detections]
+            headcount = occupancy_tracker.calculate_occupancy(person_centers, polygon_np)
+
+            # Draw detections and ROI polygon on output frame
+            if polygon_np is not None:
+                cv2.polylines(frame_annotated, [polygon_np], isClosed=True, color=(0, 255, 0), thickness=2)
+
+            for det in current_detections:
+                x1, y1, x2, y2 = det["bbox"]
+                cv2.rectangle(frame_annotated, (x1, y1), (x2, y2), (255, 191, 0), 2)
+
             if detect_occupancy:
-                person_centers = [det["center"] for det in current_detections]
-                headcount = occupancy_tracker.calculate_occupancy(person_centers, polygon_np)
+                hud_color = (0, 0, 255) if headcount > occupancy_limit else (0, 255, 0)
+                cv2.putText(
+                    frame_annotated,
+                    f"Occupancy: {headcount} / Limit: {occupancy_limit}",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    hud_color,
+                    2,
+                )
+
                 if headcount > occupancy_limit:
                     if sec - last_occupancy_alert >= 5.0:
                         last_occupancy_alert = sec
                         yield {
                             "track_id": None,
-                            "activity_type": "occupancy_overlimit",
+                            "activity_type": f"Occupancy Limit Exceeded ({headcount} > {occupancy_limit})",
                             "timestamp": sec,
                             "bbox": None,
                             "severity": "warning",
-                            "frame": frame
+                            "frame": frame_annotated,
+                            "headcount": headcount,
+                            "occupancy_limit": occupancy_limit
                         }
+
+            if writer is not None:
+                writer.write(frame_annotated)
+        finally:
+            if writer is not None:
+                writer.release()
 
 
 activity_detection_service = ActivityDetectionService()

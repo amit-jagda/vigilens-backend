@@ -15,6 +15,9 @@ class ObjectCountRepository:
         gallery_media_id: uuid.UUID,
         classify_gender: bool = False,
         classify_vehicle: bool = False,
+        detect_numberplate: bool = False,
+        detect_damage_parcel: bool = False,
+        detect_ppe: bool = False,
         classes_to_track: Optional[List[str]] = None
     ) -> ObjectCountMedia:
         """Create a new analysis session for object counting on a gallery media item."""
@@ -23,6 +26,9 @@ class ObjectCountRepository:
             gallery_media_id=gallery_media_id,
             classify_gender=classify_gender,
             classify_vehicle=classify_vehicle,
+            detect_numberplate=detect_numberplate,
+            detect_damage_parcel=detect_damage_parcel,
+            detect_ppe=detect_ppe,
             classes_to_track=classes_to_track,
             status="pending"
         )
@@ -116,20 +122,31 @@ class ObjectCountRepository:
         average_objects_count: float,
         video_duration_seconds: Optional[float] = None,
         processed_filepath: Optional[str] = None,
-        report_summary: Optional[dict] = None
+        report_summary: Optional[dict] = None,
+        numberplate_results: Optional[dict] = None,
+        damage_results: Optional[dict] = None,
+        ppe_results: Optional[dict] = None
     ) -> None:
         """Update metrics and status when analysis is complete, saving processed_filepath to GalleryMedia."""
+        update_values = {
+            "status": status,
+            "total_objects_count": total_objects_count,
+            "peak_objects_count": peak_objects_count,
+            "average_objects_count": average_objects_count,
+            "video_duration_seconds": video_duration_seconds,
+            "report_summary": report_summary
+        }
+        if numberplate_results is not None:
+            update_values["numberplate_results"] = numberplate_results
+        if damage_results is not None:
+            update_values["damage_results"] = damage_results
+        if ppe_results is not None:
+            update_values["ppe_results"] = ppe_results
+
         stmt = (
             update(ObjectCountMedia)
             .where(ObjectCountMedia.id == media_id)
-            .values(
-                status=status,
-                total_objects_count=total_objects_count,
-                peak_objects_count=peak_objects_count,
-                average_objects_count=average_objects_count,
-                video_duration_seconds=video_duration_seconds,
-                report_summary=report_summary
-            )
+            .values(**update_values)
         )
         await self.db.execute(stmt)
 
