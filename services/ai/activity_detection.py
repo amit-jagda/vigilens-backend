@@ -294,12 +294,17 @@ class ActivityDetectionService:
         detect_sleeping: bool = True,
         detect_walking: bool = True,
         interval: float = 0.1,
+        selected_activities: Optional[List[str]] = None,
     ) -> Generator[dict, None, None]:
         """
         Processes a video frame-by-frame using VideoFrameExtractor, applying ROI, pose, loitering, and occupancy heuristics.
         Yields detected alerts.
         """
         self._lazy_init()
+        
+        detect_sitting = False
+        if selected_activities:
+            detect_sitting = any(act.lower().strip() in ["sit", "sitting"] for act in selected_activities)
         
         # Track trackers
         loitering_tracker = LoiteringTracker()
@@ -415,6 +420,7 @@ class ActivityDetectionService:
                         "last_loitering_alert": -10.0,
                         "last_sleeping_alert": -10.0,
                         "last_walking_alert": -10.0,
+                        "last_sitting_alert": -10.0,
                         "fall_pose_window": [],
                     }
                 
@@ -623,6 +629,38 @@ class ActivityDetectionService:
                             "severity": "info",
                             "frame": frame
                         }
+
+                # Sitting alert
+                if detect_sitting:
+                    is_sitting = False
+                    if not det["is_horizontal"] and not det["is_moving"]:
+                        if 0.7 <= det["aspect_ratio"] <= 1.4:
+                            is_sitting = True
+                        
+                        has_knees = conf[13] > 0.5 and conf[14] > 0.5
+                        if has_hips and has_knees:
+                            hip_y = (xy[11][1] + xy[12][1]) / 2.0
+                            knee_y = (xy[13][1] + xy[14][1]) / 2.0
+                            hip_x = (xy[11][0] + xy[12][0]) / 2.0
+                            knee_x = (xy[13][0] + xy[14][0]) / 2.0
+                            
+                            thigh_dy = abs(knee_y - hip_y)
+                            thigh_dx = abs(knee_x - hip_x)
+                            thigh_angle = np.degrees(np.arctan2(thigh_dy, thigh_dx + 1e-6))
+                            if thigh_angle < 45.0:
+                                is_sitting = True
+                    
+                    if is_sitting:
+                        if sec - hist.get("last_sitting_alert", -10.0) >= 10.0:
+                            hist["last_sitting_alert"] = sec
+                            yield {
+                                "track_id": t_id,
+                                "activity_type": "sitting",
+                                "timestamp": sec,
+                                "bbox": det["bbox"],
+                                "severity": "info",
+                                "frame": frame
+                            }
 
             # Occupancy Limit Alert & Frame Annotation
             person_centers = [det["center"] for det in current_detections]
