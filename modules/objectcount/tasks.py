@@ -336,7 +336,9 @@ def index_objectcount_task(
             min_track_frames = configs.get("min_track_frames", 20)
             track_buffer = configs.get("track_buffer", 150)
             classes_to_track = configs.get("classes_to_track")
-            if detect_np or detect_dmg or detect_ppe_flag:
+            if detect_np:
+                classes_to_track = ["License_Plate", "license_plate", "numberplate", "Number_Plate"]
+            elif detect_dmg or detect_ppe_flag:
                 classes_to_track = None
 
             classify_vehicle = configs.get("classify_vehicle", False)

@@ -233,7 +233,8 @@ def process_activity_media_task(media_id_str: str, interval: float = 0.033):
                         occupancy_limit=occupancy_limit,
                         detect_sleeping=detect_sleeping,
                         detect_walking=detect_walking,
-                        interval=interval
+                        interval=interval,
+                        selected_activities=selected_activities
                     ):
                         orig_frame = alert["frame"]
                         bbox = alert["bbox"]
