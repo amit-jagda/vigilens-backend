@@ -577,13 +577,12 @@ async def _process_video_job(
                             if track_info.get("is_new_visitor"):
                                 first_time_visitors_count = max(0, first_time_visitors_count - 1)
                                 track_info["is_new_visitor"] = False
-                            
-                            try:
-                                await db.execute(delete(PersonEmbedding).where(PersonEmbedding.identity_id == old_visitor_id))
-                                await db.execute(delete(PersonIdentity).where(PersonIdentity.id == old_visitor_id))
-                                await db.commit()
-                            except Exception as db_err:
-                                print(f"Error cleaning up upgraded visitor: {db_err}")
+                                try:
+                                    await db.execute(delete(PersonEmbedding).where(PersonEmbedding.identity_id == old_visitor_id))
+                                    await db.execute(delete(PersonIdentity).where(PersonIdentity.id == old_visitor_id))
+                                    await db.commit()
+                                except Exception as db_err:
+                                    print(f"Error cleaning up upgraded visitor: {db_err}")
                         
                         track_info.update({
                             "type": "employee",
@@ -612,10 +611,11 @@ async def _process_video_job(
                                     "type": "visitor",
                                     "id": visitor.id,
                                     "label": label_name,
-                                    "color": (0, 180, 255)
+                                    "color": (255, 0, 0),
+                                    "matched": True,
+                                    "embedding_timestamp": timestamp_sec
                                 })
                                 unique_seen_identities.add(f"visitor:{visitor.id}")
-                                await repo.create_person_embedding(identity_id=visitor.id, embedding=face_embedding.tolist(), bbox=matched_face["bbox"], timestamp=timestamp_sec)
                             elif register_new_visitors:
                                 # 3. Create new Face Visitor
                                 visitor = await repo.create_person_identity(session.tenant_id, class_id=1)
@@ -625,7 +625,8 @@ async def _process_video_job(
                                     "id": visitor.id,
                                     "label": "New Visitor",
                                     "color": (0, 0, 255),
-                                    "is_new_visitor": True
+                                    "is_new_visitor": True,
+                                    "embedding_timestamp": timestamp_sec
                                 })
                                 unique_seen_identities.add(f"visitor:{visitor.id}")
                                 first_time_visitors_count += 1
@@ -707,8 +708,44 @@ async def _process_video_job(
             if tracker_id not in crossing_tracker_ids:
                 discarded_tracker_ids.add(tracker_id)
                 del active_tracks[tracker_id]
+                
+                # Cleanup discarded track identity/embeddings from database
+                if track_info["id"] is not None:
+                    # Only cleanup if this identity is not used by any other active tracks
+                    is_referenced = any(t["id"] == track_info["id"] for t in active_tracks.values())
+                    if not is_referenced:
+                        if track_info.get("is_new_visitor"):
+                            try:
+                                await db.execute(delete(PersonEmbedding).where(PersonEmbedding.identity_id == track_info["id"]))
+                                await db.execute(delete(PersonIdentity).where(PersonIdentity.id == track_info["id"]))
+                                await db.commit()
+                            except Exception as db_err:
+                                logger.error(f"Error cleaning up discarded new visitor: {db_err}")
+                        else:
+                            try:
+                                if "embedding_timestamp" in track_info:
+                                    await db.execute(delete(PersonEmbedding).where(
+                                        PersonEmbedding.identity_id == track_info["id"]
+                                    ).where(
+                                        PersonEmbedding.timestamp == track_info["embedding_timestamp"]
+                                    ))
+                                    await db.commit()
+                            except Exception as db_err:
+                                logger.error(f"Error cleaning up discarded repeat visitor embedding: {db_err}")
             else:
                 track_info["short_crossing"] = True
+
+    # Recalculate unique_seen_identities and first_time_visitors_count from remaining active_tracks
+    unique_seen_identities = set()
+    first_time_visitors_count = 0
+    for tracker_id, track in active_tracks.items():
+        if track["id"] is not None:
+            if track["type"] == "employee":
+                unique_seen_identities.add(f"employee:{track['id']}")
+            elif track["type"] == "visitor":
+                unique_seen_identities.add(f"visitor:{track['id']}")
+                if track.get("is_new_visitor"):
+                    first_time_visitors_count += 1
 
     # Filter crossings: only keep crossings for non-discarded tracks, and map to resolved visitor IDs
     valid_crossings = []
