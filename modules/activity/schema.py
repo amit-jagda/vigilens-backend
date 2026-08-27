@@ -14,6 +14,10 @@ class ActivityConfigBase(BaseModel):
     occupancy_limit: int = 5
     detect_sleeping: bool = True
     detect_walking: bool = True
+    detect_sitting: bool = False
+    detect_fighting: bool = False
+    detect_smoking: bool = False
+    detect_phone_usage: bool = False
     selected_activities: Optional[List[str]] = Field(
         None,
         description="Specific custom activities from labels.txt to detect. If null/empty, defaults apply."
@@ -65,6 +69,20 @@ class ActivityProcessStatusResponse(BaseModel):
 
 
 # --- ALERT REPORT SCHEMAS ---
+class ActivityGalleryMediaResponse(BaseModel):
+    id: UUID
+    filename: str
+    filepath: str
+    processed_filepath: Optional[str] = None
+    media_type: str
+    status: str
+    created_at: datetime
+    config: Optional[ActivityConfigResponse] = None
+
+    class Config:
+        from_attributes = True
+
+
 class ActivityAlertResponse(BaseModel):
     id: UUID
     gallery_media_id: UUID
@@ -75,6 +93,7 @@ class ActivityAlertResponse(BaseModel):
     snapshot_path: Optional[str] = None
     severity: str
     created_at: datetime
+    gallery_media: Optional[ActivityGalleryMediaResponse] = None
 
     class Config:
         from_attributes = True

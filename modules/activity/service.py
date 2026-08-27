@@ -42,6 +42,10 @@ class ActivityService:
             occupancy_limit=payload.occupancy_limit,
             detect_sleeping=payload.detect_sleeping,
             detect_walking=payload.detect_walking,
+            detect_sitting=payload.detect_sitting,
+            detect_fighting=payload.detect_fighting,
+            detect_smoking=payload.detect_smoking,
+            detect_phone_usage=payload.detect_phone_usage,
             selected_activities=payload.selected_activities
         )
         await self.db.commit()
@@ -49,6 +53,14 @@ class ActivityService:
         try:
             await self.gallery_repo.update_media_status(gallery_media_id, "processing")
             await self.db.commit()
+
+            # Invalidate gallery media list cache
+            try:
+                from database.redis import delete_cached
+                for suffix in ["", ":all", ":photo", ":video"]:
+                    await delete_cached(f"gallery_media_list:{tenant_id}{suffix}")
+            except Exception:
+                pass
 
             from modules.activity.tasks import process_activity_media_task
             process_activity_media_task.delay(str(gallery_media_id), interval=payload.interval)

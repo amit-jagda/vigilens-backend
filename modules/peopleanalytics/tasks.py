@@ -31,8 +31,50 @@ from services.ai.face_recognition import face_rec_service
 from services.ai.math_utils import map_similarity_threshold, find_best_match_in_cache, is_face_occluded
 from modules.employees.cache import get_cached_employee_embeddings
 
+import json
+import subprocess
+from PIL import Image, ImageOps
+
 ANALYTICS_OUTPUTS_DIR = os.path.join("storage", "people_analytics_outputs")
 os.makedirs(ANALYTICS_OUTPUTS_DIR, exist_ok=True)
+
+
+def _get_video_rotation(filepath: str) -> int:
+    """Detect rotation angle (0, 90, 180, 270) from video stream metadata using ffprobe."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "quiet",
+            "-print_format", "json",
+            "-show_streams",
+            filepath
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        data = json.loads(result.stdout)
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") == "video":
+                for side in stream.get("side_data_list", []):
+                    if "rotation" in side:
+                        rot = int(float(side["rotation"]))
+                        return (rot % 360 + 360) % 360
+                tags = stream.get("tags", {})
+                if "rotate" in tags:
+                    rot = int(float(tags["rotate"]))
+                    return (rot % 360 + 360) % 360
+    except Exception as e:
+        logger.debug(f"Could not determine video rotation via ffprobe: {e}")
+    return 0
+
+
+def _orient_frame(frame: np.ndarray, rotation: int) -> np.ndarray:
+    """Apply cv2 rotation/flip based on rotation angle."""
+    if rotation == 90:
+        return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    elif rotation == 180:
+        return cv2.rotate(frame, cv2.ROTATE_180)
+    elif rotation == 270:
+        return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return frame
+
 
 VISITOR_CROPS_DIR = os.path.join("storage", "visitor_crops")
 os.makedirs(VISITOR_CROPS_DIR, exist_ok=True)
@@ -151,8 +193,14 @@ async def _process_image_job(
     track_repeat_visitors: bool = True,
     track_occupancy: bool = True
 ):
-    # Process static image
-    img = cv2.imread(filepath)
+    # Process static image with EXIF orientation auto-fix
+    try:
+        with Image.open(filepath) as pil_img:
+            pil_img_transposed = ImageOps.exif_transpose(pil_img)
+            img = cv2.cvtColor(np.array(pil_img_transposed), cv2.COLOR_RGB2BGR)
+    except Exception:
+        img = cv2.imread(filepath)
+
     if img is None:
         logger.error(f"People Analytics processing failed for session ID {session.id}: Image file could not be read.")
         raise ValueError("Could not read image file.")
@@ -384,13 +432,19 @@ async def _process_video_job(
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
+    video_rotation = _get_video_rotation(filepath)
+    if video_rotation in (90, 270):
+        out_w, out_h = orig_height, orig_width
+    else:
+        out_w, out_h = orig_width, orig_height
+
     # Initialize video writer
     output_filename = f"{uuid.uuid4()}_annotated.mp4"
     user_outputs_dir = os.path.join(ANALYTICS_OUTPUTS_DIR, user_id_str) if user_id_str else ANALYTICS_OUTPUTS_DIR
     os.makedirs(user_outputs_dir, exist_ok=True)
     output_path = os.path.join(user_outputs_dir, output_filename)
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    output_writer = cv2.VideoWriter(output_path, fourcc, fps, (orig_width, orig_height))
+    output_writer = cv2.VideoWriter(output_path, fourcc, fps, (out_w, out_h))
 
     # Initialize tracker and line crossing
     tracker = sv.ByteTrack(
@@ -426,6 +480,9 @@ async def _process_video_job(
         ret, frame = cap.read()
         if not ret or frame is None:
             break
+
+        if video_rotation != 0:
+            frame = _orient_frame(frame, video_rotation)
 
         if frame_idx % 10 == 0:
             progress = int((frame_idx / total_frames) * 100) if total_frames > 0 else 0
@@ -466,7 +523,7 @@ async def _process_video_job(
 
                 x1, y1, x2, y2 = map(int, xyxy)
                 x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(orig_width, x2), min(orig_height, y2)
+                x2, y2 = min(out_w, x2), min(out_h, y2)
 
                 center_x = (x1 + x2) / 2
                 center_y = (y1 + y2) / 2
@@ -652,7 +709,7 @@ async def _process_video_job(
 
         # Draw HUD on video frame
         hud_w, hud_h = 320, 220
-        if orig_width > hud_w + 20 and orig_height > hud_h + 20:
+        if out_w > hud_w + 20 and out_h > hud_h + 20:
             sub_img = frame[10:10+hud_h, 10:10+hud_w]
             rect = np.zeros(sub_img.shape, dtype=np.uint8) + 20  # dark background
             blended = cv2.addWeighted(sub_img, 0.4, rect, 0.6, 0)

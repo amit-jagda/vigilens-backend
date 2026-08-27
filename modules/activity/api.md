@@ -1,6 +1,6 @@
 # Human Activity & Theft Detection API Documentation
 
-This module provides APIs for configuring safety and security parameters (Region of Interest polygon, detection rules for falling, slipping, loitering thresholds, occupancy limits, sleeping, walking) on a gallery media item, triggering background pose and behavior tracking, and fetching alerts and summary statistics.
+This module provides APIs for configuring safety and security parameters (Region of Interest polygon, detection rules for falling, slipping, loitering thresholds, occupancy limits, sleeping, walking, sitting, fighting, smoking, and phone usage) on a gallery media item, triggering background pose and behavior tracking, and fetching alerts and sessions.
 
 ---
 
@@ -31,6 +31,7 @@ Every endpoint returns a unified JSON format wrapped in a standard structure:
 4. [Get Process History](#4-get-process-history) (`GET /activity/process/{gallery_media_id}/history`)
 5. [Get Alerts Report](#5-get-alerts-report) (`GET /activity/report`)
 6. [Get Alerts Summary](#6-get-alerts-summary) (`GET /activity/report/summary`)
+7. [Get Activity Sessions](#7-get-activity-sessions) (`GET /activity/sessions`)
 
 ---
 
@@ -66,6 +67,10 @@ Triggers background activity and behavior detection on a gallery media item usin
   "occupancy_limit": 5,
   "detect_sleeping": true,
   "detect_walking": true,
+  "detect_sitting": false,
+  "detect_fighting": false,
+  "detect_smoking": false,
+  "detect_phone_usage": false,
   "selected_activities": null,
   "polygon_points": [
     [100, 150],
@@ -122,6 +127,10 @@ Retrieves execution status and active config settings of the media file process.
       "occupancy_limit": 5,
       "detect_sleeping": true,
       "detect_walking": true,
+      "detect_sitting": false,
+      "detect_fighting": false,
+      "detect_smoking": false,
+      "detect_phone_usage": false,
       "selected_activities": null,
       "polygon_points": [
         [100, 150],
@@ -158,3 +167,55 @@ Generates aggregated status metrics (total alerts, breakdown by type, breakdown 
 
 * **Method:** `GET`
 * **URL:** `/activity/report/summary`
+
+---
+
+### 7. Get Activity Sessions
+Retrieves all processed/processing video/photo activity sessions scoped to your tenant.
+
+* **Method:** `GET`
+* **URL:** `/activity/sessions`
+
+#### Example Response
+```json
+{
+  "message": "Activity sessions retrieved successfully.",
+  "status": 200,
+  "data": [
+    {
+      "id": "e4f5a6b7-89ab-cdef-0123-456789abcdef",
+      "filename": "security_cam_entrance.mp4",
+      "filepath": "storage/gallery/security_cam_entrance.mp4",
+      "processed_filepath": "storage/activity_media/output_e4f5a6b7-89ab-cdef-0123-456789abcdef.mp4",
+      "media_type": "video",
+      "status": "completed",
+      "created_at": "2026-06-22T17:45:00.123456Z",
+      "config": {
+        "id": "c1a2b3c4-d5e6-7f8a-9b0c-1d2e3f4a5b6c",
+        "gallery_media_id": "e4f5a6b7-89ab-cdef-0123-456789abcdef",
+        "detect_fall": true,
+        "detect_aggression": true,
+        "detect_intrusion": true,
+        "detect_loitering": true,
+        "loitering_threshold": 15.0,
+        "detect_occupancy": true,
+        "occupancy_limit": 5,
+        "detect_sleeping": true,
+        "detect_walking": true,
+        "detect_sitting": false,
+        "detect_fighting": false,
+        "detect_smoking": false,
+        "detect_phone_usage": false,
+        "selected_activities": null,
+        "polygon_points": [
+          [100, 150],
+          [400, 150],
+          [450, 500],
+          [80, 500]
+        ],
+        "created_at": "2026-06-22T17:45:01.000000Z"
+      }
+    }
+  ]
+}
+```

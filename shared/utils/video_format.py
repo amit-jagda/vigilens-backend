@@ -43,7 +43,8 @@ PRESETS = {
 def videoFormatChanger(
     input_path: str,
     formats: list | str | dict | None = None,
-    overwrite_input: bool = True
+    overwrite_input: bool = True,
+    vf: str | None = None
 ) -> dict[str, str]:
     """
     Transcodes a video to one or more formats using FFmpeg.
@@ -54,6 +55,7 @@ def videoFormatChanger(
                  or a list of these. If None, defaults to 'h264'.
         overwrite_input: If True, only one format is requested, and its extension matches
                          the input_path, the original input video is replaced.
+        vf: Optional video filter string for FFmpeg (e.g. 'vflip', 'hflip', 'transpose=1').
                          
     Returns:
         A dictionary mapping the format specification name (or index) to the generated file path.
@@ -104,6 +106,7 @@ def videoFormatChanger(
             
         custom_output_path = config.get("output_path")
         should_overwrite = config.get("overwrite_input", overwrite_input)
+        filter_str = config.get("vf", vf)
         
         is_single_overwrite = (
             len(formats) == 1 and 
@@ -125,6 +128,8 @@ def videoFormatChanger(
             
         cmd = ["ffmpeg", "-i", input_path]
         
+        if filter_str:
+            cmd.extend(["-vf", filter_str])
         if vcodec:
             cmd.extend(["-vcodec", vcodec])
         if pix_fmt:

@@ -32,6 +32,11 @@ class ActivityConfig(BaseModel):
 
     detect_sleeping: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     detect_walking: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    
+    detect_sitting: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    detect_fighting: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    detect_smoking: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    detect_phone_usage: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
     # Selected custom activity labels to track
     selected_activities: Mapped[Optional[List[str]]] = mapped_column(JSON, nullable=True)

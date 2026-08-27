@@ -133,6 +133,10 @@ class ActivityDetectionService:
         detect_fall: bool = True,
         detect_sleeping: bool = True,
         detect_walking: bool = True,
+        detect_sitting: bool = False,
+        detect_fighting: bool = False,
+        detect_smoking: bool = False,
+        detect_phone_usage: bool = False,
         interval: float = 0.1,
         threshold: float = 0.5
     ) -> Generator[dict, None, None]:
@@ -154,8 +158,19 @@ class ActivityDetectionService:
                 target_labels.add("walk")
                 target_labels.add("run/jog")
                 target_labels.add("stand")
-                target_labels.add("crouch/kneel")
                 target_labels.add("bend/bow (at the waist)")
+            if detect_sitting:
+                target_labels.add("sit")
+                target_labels.add("crouch/kneel")
+            if detect_fighting:
+                target_labels.add("fight/hit (a person)")
+                target_labels.add("push (another person)")
+                target_labels.add("grab (a person)")
+            if detect_smoking:
+                target_labels.add("smoke")
+            if detect_phone_usage:
+                target_labels.add("text on/look at a cellphone")
+                target_labels.add("answer phone")
                 
             # If no target set, use all classes except default exclusions
             if not target_labels:
@@ -293,6 +308,10 @@ class ActivityDetectionService:
         occupancy_limit: int = 5,
         detect_sleeping: bool = True,
         detect_walking: bool = True,
+        detect_sitting: bool = False,
+        detect_fighting: bool = False,
+        detect_smoking: bool = False,
+        detect_phone_usage: bool = False,
         interval: float = 0.1,
         selected_activities: Optional[List[str]] = None,
     ) -> Generator[dict, None, None]:
@@ -302,9 +321,14 @@ class ActivityDetectionService:
         """
         self._lazy_init()
         
-        detect_sitting = False
+        # Override sitting/smoking/phone parameters if selected_activities contains legacy presets
         if selected_activities:
-            detect_sitting = any(act.lower().strip() in ["sit", "sitting"] for act in selected_activities)
+            if any(act.lower().strip() in ["sit", "sitting"] for act in selected_activities):
+                detect_sitting = True
+            if any(act.lower().strip() in ["smoke", "smoking"] for act in selected_activities):
+                detect_smoking = True
+            if any(act.lower().strip() in ["phone", "cellphone"] for act in selected_activities):
+                detect_phone_usage = True
         
         # Track trackers
         loitering_tracker = LoiteringTracker()
@@ -357,351 +381,351 @@ class ActivityDetectionService:
                 for d_id in disappeared_ids:
                     loitering_tracker.reset_track(d_id)
 
-            for idx, track_id in enumerate(track_ids):
-                # Get bounding box in frame_small coordinates and restore to full size
-                box_small = boxes.xyxy[idx].cpu().numpy()
-                xmin = int(box_small[0] / scale)
-                ymin = int(box_small[1] / scale)
-                xmax = int(box_small[2] / scale)
-                ymax = int(box_small[3] / scale)
-                
-                # Check bounds
-                xmin, xmax = max(0, min(xmin, w_orig - 1)), max(0, min(xmax, w_orig - 1))
-                ymin, ymax = max(0, min(ymin, h_orig - 1)), max(0, min(ymax, h_orig - 1))
-                
-                box_height = ymax - ymin
-                box_width = xmax - xmin
-                aspect_ratio = box_height / (box_width + 1e-6)
-
-                # Keypoints in small frame coords, scale back to original resolution
-                xy_small = keypoints_obj.xy[idx].cpu().numpy()  # [17, 2]
-                conf = keypoints_obj.conf[idx].cpu().numpy()  # [17]
-                
-                xy = xy_small / scale
-
-                # Fall / Slip detection
-                has_shoulders = conf[5] > 0.5 and conf[6] > 0.5
-                has_hips = conf[11] > 0.5 and conf[12] > 0.5
-                
-                body_angle = 0.0
-                is_horizontal = False
-                
-                if has_shoulders and has_hips:
-                    shoulder_x = (xy[5][0] + xy[6][0]) / 2.0
-                    shoulder_y = (xy[5][1] + xy[6][1]) / 2.0
-                    hip_x = (xy[11][0] + xy[12][0]) / 2.0
-                    hip_y = (xy[11][1] + xy[12][1]) / 2.0
+                for idx, track_id in enumerate(track_ids):
+                    # Get bounding box in frame_small coordinates and restore to full size
+                    box_small = boxes.xyxy[idx].cpu().numpy()
+                    xmin = int(box_small[0] / scale)
+                    ymin = int(box_small[1] / scale)
+                    xmax = int(box_small[2] / scale)
+                    ymax = int(box_small[3] / scale)
                     
-                    dx = hip_x - shoulder_x
-                    dy = hip_y - shoulder_y
-                    body_angle = np.degrees(np.arctan2(abs(dx), abs(dy) + 1e-6))
-                    if body_angle > 55.0:
-                        is_horizontal = True
+                    # Check bounds
+                    xmin, xmax = max(0, min(xmin, w_orig - 1)), max(0, min(xmax, w_orig - 1))
+                    ymin, ymax = max(0, min(ymin, h_orig - 1)), max(0, min(ymax, h_orig - 1))
+                    
+                    box_height = ymax - ymin
+                    box_width = xmax - xmin
+                    aspect_ratio = box_height / (box_width + 1e-6)
+
+                    # Keypoints in small frame coords, scale back to original resolution
+                    xy_small = keypoints_obj.xy[idx].cpu().numpy()  # [17, 2]
+                    conf = keypoints_obj.conf[idx].cpu().numpy()  # [17]
+                    
+                    xy = xy_small / scale
+
+                    # Fall / Slip detection
+                    has_shoulders = conf[5] > 0.5 and conf[6] > 0.5
+                    has_hips = conf[11] > 0.5 and conf[12] > 0.5
+                    
+                    body_angle = 0.0
+                    is_horizontal = False
+                    
+                    if has_shoulders and has_hips:
+                        shoulder_x = (xy[5][0] + xy[6][0]) / 2.0
+                        shoulder_y = (xy[5][1] + xy[6][1]) / 2.0
+                        hip_x = (xy[11][0] + xy[12][0]) / 2.0
+                        hip_y = (xy[11][1] + xy[12][1]) / 2.0
                         
-                if not (has_shoulders and has_hips) and aspect_ratio < 0.75:
-                    is_horizontal = True
-
-                # Init history
-                if track_id not in person_history:
-                    person_history[track_id] = {
-                        "hip_y": [],
-                        "rel_wrist_l": [],
-                        "rel_wrist_r": [],
-                        "rel_elbow_l": [],
-                        "rel_elbow_r": [],
-                        "horizontal_history": [],
-                        "horizontal_start_time": None,
-                        "centers": [],
-                        "com_history": [],
-                        "ar_history": [],
-                        "last_fall_alert": -10.0,
-                        "last_intrusion_alert": -10.0,
-                        "last_aggression_alert": -10.0,
-                        "last_loitering_alert": -10.0,
-                        "last_sleeping_alert": -10.0,
-                        "last_walking_alert": -10.0,
-                        "last_sitting_alert": -10.0,
-                        "fall_pose_window": [],
-                    }
-                
-                history = person_history[track_id]
-                
-                # Hips Y tracking
-                current_hip_y = (xy[11][1] + xy[12][1]) / 2.0 if has_hips else (ymin + ymax) / 2.0
-                history["hip_y"].append(current_hip_y)
-                if len(history["hip_y"]) > 10:
-                    history["hip_y"].pop(0)
-
-                # Wrist & elbow velocity tracking (normalized)
-                if conf[9] > 0.5 and conf[5] > 0.5:
-                    history["rel_wrist_l"].append(xy[9] - xy[5])
-                if len(history["rel_wrist_l"]) > 10:
-                    history["rel_wrist_l"].pop(0)
-
-                if conf[10] > 0.5 and conf[6] > 0.5:
-                    history["rel_wrist_r"].append(xy[10] - xy[6])
-                if len(history["rel_wrist_r"]) > 10:
-                    history["rel_wrist_r"].pop(0)
-
-                if conf[7] > 0.5 and conf[5] > 0.5:
-                    history["rel_elbow_l"].append(xy[7] - xy[5])
-                if len(history["rel_elbow_l"]) > 10:
-                    history["rel_elbow_l"].pop(0)
-
-                if conf[8] > 0.5 and conf[6] > 0.5:
-                    history["rel_elbow_r"].append(xy[8] - xy[6])
-                if len(history["rel_elbow_r"]) > 10:
-                    history["rel_elbow_r"].pop(0)
-
-                # Track horizontal history & sleeping state duration
-                history["horizontal_history"].append(is_horizontal)
-                if len(history["horizontal_history"]) > 15:
-                    history["horizontal_history"].pop(0)
-
-                if is_horizontal:
-                    if history["horizontal_start_time"] is None:
-                        history["horizontal_start_time"] = sec
-                else:
-                    history["horizontal_start_time"] = None
-
-                # Fall / Slip detection (using logic from Human-Fall-Detection-master)
-                is_falling = False
-                is_slipping = False
-                
-                # Check if pose has required keypoints for tracking center of mass
-                # Required: left eye (1), right eye (2), left shoulder (5), right shoulder (6)
-                required_joints = [1, 2, 5, 6]
-                is_complete = all(conf[idx] > 0.2 for idx in required_joints) and np.sum(conf > 0.2) >= 10
-                
-                if is_complete:
-                    scale_to_960 = 960.0 / w_orig
-                    xy_960 = xy * scale_to_960
-                    history["fall_pose_window"].append((xy_960, conf, sec))
-                    if len(history["fall_pose_window"]) > FALL_WINDOW_SIZE:
-                        history["fall_pose_window"].pop(0)
-                
-                if len(history["fall_pose_window"]) >= FALL_WINDOW_SIZE:
-                    p1_xy, p1_conf, p1_sec = history["fall_pose_window"][0]
-                    p2_xy, p2_conf, p2_sec = history["fall_pose_window"][-1]
-                    
-                    # Compute Center of Mass (COM)
-                    c1 = np.mean([p1_xy[1], p1_xy[2], p1_xy[5], p1_xy[6]], axis=0)
-                    c2 = np.mean([p2_xy[1], p2_xy[2], p2_xy[5], p2_xy[6]], axis=0)
-                    
-                    dx = c2[0] - c1[0]
-                    dy = c2[1] - c1[1]
-                    dist = np.sqrt(dx**2 + dy**2)
-                    
-                    # Duration in seconds
-                    t_duration = p2_sec - p1_sec
-                    if t_duration <= 0:
-                        t_duration = 0.1
-                    velocity = min(dist / t_duration, 300.0)
-                    
-                    # Aspect Ratio function
-                    def _get_aspect_ratio(kpts_xy, kpts_conf):
-                        visible = kpts_xy[kpts_conf > 0.2]
-                        if len(visible) == 0:
-                            return 0.0
-                        x_coords = visible[:, 0]
-                        y_coords = visible[:, 1]
-                        w_box = np.max(x_coords) - np.min(x_coords)
-                        h_box = np.max(y_coords) - np.min(y_coords)
-                        return w_box / h_box if h_box > 0 else 0.0
-                    
-                    ar_start = _get_aspect_ratio(p1_xy, p1_conf)
-                    ar_end = _get_aspect_ratio(p2_xy, p2_conf)
-                    ar_delta = ar_end - ar_start
-                    
-                    # Check SpeedDrop (velocity threshold and vertical drop threshold)
-                    if velocity > FALL_V_THRESH and dy > FALL_DY_THRESH and ar_end > 0.1:
-                        is_falling = True
-                        
-                    # Check DownFlat (vertical drop threshold and aspect ratio threshold)
-                    if dy > FALL_DY_THRESH and ar_delta > FALL_AR_THRESH:
-                        is_slipping = True
-
-                # Determine if alert needed
-                center_x = int((xmin + xmax) / 2)
-                center_y = int((ymin + ymax) / 2)
-
-                # Track center history
-                history["centers"].append((center_x, center_y, sec))
-                while history["centers"] and sec - history["centers"][0][2] > 2.0:
-                    history["centers"].pop(0)
-
-                # Velocity-based movement detection
-                is_moving = False
-                if len(history["centers"]) >= 2:
-                    oldest_center = history["centers"][0]
-                    for c in history["centers"]:
-                        if sec - c[2] >= 0.5:
-                            oldest_center = c
-                            break
-                    dt = sec - oldest_center[2]
-                    if dt >= 0.3:
-                        dist = np.sqrt((center_x - oldest_center[0])**2 + (center_y - oldest_center[1])**2)
-                        velocity = dist / (box_height + 1e-6) / dt
-                        if velocity > 0.08:
-                            is_moving = True
-
-                # Check ROI intrusion
-                is_intruded = False
-                if polygon_np is not None:
-                    is_intruded = self.inside_polygon((center_x, center_y), polygon_np)
-
-                # Save detection state for current frame
-                current_detections.append({
-                    "track_id": track_id,
-                    "bbox": [xmin, ymin, xmax, ymax],
-                    "center": (center_x, center_y),
-                    "is_horizontal": is_horizontal,
-                    "is_falling": is_falling,
-                    "is_slipping": is_slipping,
-                    "is_moving": is_moving,
-                    "is_intruded": is_intruded,
-                    "xy": xy,
-                    "conf": conf,
-                    "aspect_ratio": aspect_ratio,
-                    "body_angle": body_angle
-                })
-
-            # Check individual safety, intrusion, and loitering alerts
-            for det in current_detections:
-                t_id = det["track_id"]
-                hist = person_history[t_id]
-                
-                # Fall/Slip alert
-                if detect_fall:
-                    if det["is_slipping"] or det["is_falling"]:
-                        if sec - hist["last_fall_alert"] >= 5.0:  # 5-second cooldown
-                            hist["last_fall_alert"] = sec
-                            alert_type = "slipping" if det["is_slipping"] else "falling"
-                            yield {
-                                "track_id": t_id,
-                                "activity_type": alert_type,
-                                "timestamp": sec,
-                                "bbox": det["bbox"],
-                                "severity": "critical",
-                                "frame": frame
-                            }
-
-                # Loitering alert
-                if detect_loitering:
-                    # Person needs to be inside the ROI boundary to accumulate loitering duration
-                    in_roi, time_spent = loitering_tracker.track_person(t_id, det["is_intruded"], sec)
-                    if in_roi and time_spent >= loitering_threshold:
-                        if sec - hist["last_loitering_alert"] >= 5.0:
-                            hist["last_loitering_alert"] = sec
-                            yield {
-                                "track_id": t_id,
-                                "activity_type": "loitering",
-                                "timestamp": sec,
-                                "bbox": det["bbox"],
-                                "severity": "warning",
-                                "frame": frame
-                            }
-
-                # Sleeping alert
-                if detect_sleeping and det["is_horizontal"]:
-                    horizontal_duration = sec - hist["horizontal_start_time"] if hist["horizontal_start_time"] is not None else 0.0
-                    if horizontal_duration >= 5.0:
-                        if sec - hist["last_sleeping_alert"] >= 10.0 and sec - hist["last_fall_alert"] >= 15.0:
-                            hist["last_sleeping_alert"] = sec
-                            yield {
-                                "track_id": t_id,
-                                "activity_type": "sleeping",
-                                "timestamp": sec,
-                                "bbox": det["bbox"],
-                                "severity": "info",
-                                "frame": frame
-                            }
-
-                # Walking alert
-                if detect_walking and det["aspect_ratio"] > 1.2 and not det["is_horizontal"] and det["is_moving"]:
-                    if sec - hist["last_walking_alert"] >= 10.0:
-                        hist["last_walking_alert"] = sec
-                        yield {
-                            "track_id": t_id,
-                            "activity_type": "walking",
-                            "timestamp": sec,
-                            "bbox": det["bbox"],
-                            "severity": "info",
-                            "frame": frame
-                        }
-
-                # Sitting alert
-                if detect_sitting:
-                    is_sitting = False
-                    if not det["is_horizontal"] and not det["is_moving"]:
-                        if 0.7 <= det["aspect_ratio"] <= 1.4:
-                            is_sitting = True
-                        
-                        has_knees = conf[13] > 0.5 and conf[14] > 0.5
-                        if has_hips and has_knees:
-                            hip_y = (xy[11][1] + xy[12][1]) / 2.0
-                            knee_y = (xy[13][1] + xy[14][1]) / 2.0
-                            hip_x = (xy[11][0] + xy[12][0]) / 2.0
-                            knee_x = (xy[13][0] + xy[14][0]) / 2.0
+                        dx = hip_x - shoulder_x
+                        dy = hip_y - shoulder_y
+                        body_angle = np.degrees(np.arctan2(abs(dx), abs(dy) + 1e-6))
+                        if body_angle > 55.0:
+                            is_horizontal = True
                             
-                            thigh_dy = abs(knee_y - hip_y)
-                            thigh_dx = abs(knee_x - hip_x)
-                            thigh_angle = np.degrees(np.arctan2(thigh_dy, thigh_dx + 1e-6))
-                            if thigh_angle < 45.0:
-                                is_sitting = True
+                    if not (has_shoulders and has_hips) and aspect_ratio < 0.75:
+                        is_horizontal = True
+
+                    # Init history
+                    if track_id not in person_history:
+                        person_history[track_id] = {
+                            "hip_y": [],
+                            "rel_wrist_l": [],
+                            "rel_wrist_r": [],
+                            "rel_elbow_l": [],
+                            "rel_elbow_r": [],
+                            "horizontal_history": [],
+                            "horizontal_start_time": None,
+                            "centers": [],
+                            "com_history": [],
+                            "ar_history": [],
+                            "last_fall_alert": -10.0,
+                            "last_intrusion_alert": -10.0,
+                            "last_aggression_alert": -10.0,
+                            "last_loitering_alert": -10.0,
+                            "last_sleeping_alert": -10.0,
+                            "last_walking_alert": -10.0,
+                            "last_sitting_alert": -10.0,
+                            "fall_pose_window": [],
+                        }
                     
-                    if is_sitting:
-                        if sec - hist.get("last_sitting_alert", -10.0) >= 10.0:
-                            hist["last_sitting_alert"] = sec
+                    history = person_history[track_id]
+                    
+                    # Hips Y tracking
+                    current_hip_y = (xy[11][1] + xy[12][1]) / 2.0 if has_hips else (ymin + ymax) / 2.0
+                    history["hip_y"].append(current_hip_y)
+                    if len(history["hip_y"]) > 10:
+                        history["hip_y"].pop(0)
+
+                    # Wrist & elbow velocity tracking (normalized)
+                    if conf[9] > 0.5 and conf[5] > 0.5:
+                        history["rel_wrist_l"].append(xy[9] - xy[5])
+                    if len(history["rel_wrist_l"]) > 10:
+                        history["rel_wrist_l"].pop(0)
+
+                    if conf[10] > 0.5 and conf[6] > 0.5:
+                        history["rel_wrist_r"].append(xy[10] - xy[6])
+                    if len(history["rel_wrist_r"]) > 10:
+                        history["rel_wrist_r"].pop(0)
+
+                    if conf[7] > 0.5 and conf[5] > 0.5:
+                        history["rel_elbow_l"].append(xy[7] - xy[5])
+                    if len(history["rel_elbow_l"]) > 10:
+                        history["rel_elbow_l"].pop(0)
+
+                    if conf[8] > 0.5 and conf[6] > 0.5:
+                        history["rel_elbow_r"].append(xy[8] - xy[6])
+                    if len(history["rel_elbow_r"]) > 10:
+                        history["rel_elbow_r"].pop(0)
+
+                    # Track horizontal history & sleeping state duration
+                    history["horizontal_history"].append(is_horizontal)
+                    if len(history["horizontal_history"]) > 15:
+                        history["horizontal_history"].pop(0)
+
+                    if is_horizontal:
+                        if history["horizontal_start_time"] is None:
+                            history["horizontal_start_time"] = sec
+                    else:
+                        history["horizontal_start_time"] = None
+
+                    # Fall / Slip detection (using logic from Human-Fall-Detection-master)
+                    is_falling = False
+                    is_slipping = False
+                    
+                    # Check if pose has required keypoints for tracking center of mass
+                    # Required: left eye (1), right eye (2), left shoulder (5), right shoulder (6)
+                    required_joints = [1, 2, 5, 6]
+                    is_complete = all(conf[idx] > 0.2 for idx in required_joints) and np.sum(conf > 0.2) >= 10
+                    
+                    if is_complete:
+                        scale_to_960 = 960.0 / w_orig
+                        xy_960 = xy * scale_to_960
+                        history["fall_pose_window"].append((xy_960, conf, sec))
+                        if len(history["fall_pose_window"]) > FALL_WINDOW_SIZE:
+                            history["fall_pose_window"].pop(0)
+                    
+                    if len(history["fall_pose_window"]) >= FALL_WINDOW_SIZE:
+                        p1_xy, p1_conf, p1_sec = history["fall_pose_window"][0]
+                        p2_xy, p2_conf, p2_sec = history["fall_pose_window"][-1]
+                        
+                        # Compute Center of Mass (COM)
+                        c1 = np.mean([p1_xy[1], p1_xy[2], p1_xy[5], p1_xy[6]], axis=0)
+                        c2 = np.mean([p2_xy[1], p2_xy[2], p2_xy[5], p2_xy[6]], axis=0)
+                        
+                        dx = c2[0] - c1[0]
+                        dy = c2[1] - c1[1]
+                        dist = np.sqrt(dx**2 + dy**2)
+                        
+                        # Duration in seconds
+                        t_duration = p2_sec - p1_sec
+                        if t_duration <= 0:
+                            t_duration = 0.1
+                        velocity = min(dist / t_duration, 300.0)
+                        
+                        # Aspect Ratio function
+                        def _get_aspect_ratio(kpts_xy, kpts_conf):
+                            visible = kpts_xy[kpts_conf > 0.2]
+                            if len(visible) == 0:
+                                return 0.0
+                            x_coords = visible[:, 0]
+                            y_coords = visible[:, 1]
+                            w_box = np.max(x_coords) - np.min(x_coords)
+                            h_box = np.max(y_coords) - np.min(y_coords)
+                            return w_box / h_box if h_box > 0 else 0.0
+                        
+                        ar_start = _get_aspect_ratio(p1_xy, p1_conf)
+                        ar_end = _get_aspect_ratio(p2_xy, p2_conf)
+                        ar_delta = ar_end - ar_start
+                        
+                        # Check SpeedDrop (velocity threshold and vertical drop threshold)
+                        if velocity > FALL_V_THRESH and dy > FALL_DY_THRESH and ar_end > 0.1:
+                            is_falling = True
+                            
+                        # Check DownFlat (vertical drop threshold and aspect ratio threshold)
+                        if dy > FALL_DY_THRESH and ar_delta > FALL_AR_THRESH:
+                            is_slipping = True
+
+                    # Determine if alert needed
+                    center_x = int((xmin + xmax) / 2)
+                    center_y = int((ymin + ymax) / 2)
+
+                    # Track center history
+                    history["centers"].append((center_x, center_y, sec))
+                    while history["centers"] and sec - history["centers"][0][2] > 2.0:
+                        history["centers"].pop(0)
+
+                    # Velocity-based movement detection
+                    is_moving = False
+                    if len(history["centers"]) >= 2:
+                        oldest_center = history["centers"][0]
+                        for c in history["centers"]:
+                            if sec - c[2] >= 0.5:
+                                oldest_center = c
+                                break
+                        dt = sec - oldest_center[2]
+                        if dt >= 0.3:
+                            dist = np.sqrt((center_x - oldest_center[0])**2 + (center_y - oldest_center[1])**2)
+                            velocity = dist / (box_height + 1e-6) / dt
+                            if velocity > 0.08:
+                                is_moving = True
+
+                    # Check ROI intrusion
+                    is_intruded = False
+                    if polygon_np is not None:
+                        is_intruded = self.inside_polygon((center_x, center_y), polygon_np)
+
+                    # Save detection state for current frame
+                    current_detections.append({
+                        "track_id": track_id,
+                        "bbox": [xmin, ymin, xmax, ymax],
+                        "center": (center_x, center_y),
+                        "is_horizontal": is_horizontal,
+                        "is_falling": is_falling,
+                        "is_slipping": is_slipping,
+                        "is_moving": is_moving,
+                        "is_intruded": is_intruded,
+                        "xy": xy,
+                        "conf": conf,
+                        "aspect_ratio": aspect_ratio,
+                        "body_angle": body_angle
+                    })
+
+                # Check individual safety, intrusion, and loitering alerts
+                for det in current_detections:
+                    t_id = det["track_id"]
+                    hist = person_history[t_id]
+                    
+                    # Fall/Slip alert
+                    if detect_fall:
+                        if det["is_slipping"] or det["is_falling"]:
+                            if sec - hist["last_fall_alert"] >= 5.0:  # 5-second cooldown
+                                hist["last_fall_alert"] = sec
+                                alert_type = "slipping" if det["is_slipping"] else "falling"
+                                yield {
+                                    "track_id": t_id,
+                                    "activity_type": alert_type,
+                                    "timestamp": sec,
+                                    "bbox": det["bbox"],
+                                    "severity": "critical",
+                                    "frame": frame
+                                }
+
+                    # Loitering alert
+                    if detect_loitering:
+                        # Person needs to be inside the ROI boundary to accumulate loitering duration
+                        in_roi, time_spent = loitering_tracker.track_person(t_id, det["is_intruded"], sec)
+                        if in_roi and time_spent >= loitering_threshold:
+                            if sec - hist["last_loitering_alert"] >= 5.0:
+                                hist["last_loitering_alert"] = sec
+                                yield {
+                                    "track_id": t_id,
+                                    "activity_type": "loitering",
+                                    "timestamp": sec,
+                                    "bbox": det["bbox"],
+                                    "severity": "warning",
+                                    "frame": frame
+                                }
+
+                    # Sleeping alert
+                    if detect_sleeping and det["is_horizontal"]:
+                        horizontal_duration = sec - hist["horizontal_start_time"] if hist["horizontal_start_time"] is not None else 0.0
+                        if horizontal_duration >= 5.0:
+                            if sec - hist["last_sleeping_alert"] >= 10.0 and sec - hist["last_fall_alert"] >= 15.0:
+                                hist["last_sleeping_alert"] = sec
+                                yield {
+                                    "track_id": t_id,
+                                    "activity_type": "sleeping",
+                                    "timestamp": sec,
+                                    "bbox": det["bbox"],
+                                    "severity": "info",
+                                    "frame": frame
+                                }
+
+                    # Walking alert
+                    if detect_walking and det["aspect_ratio"] > 1.2 and not det["is_horizontal"] and det["is_moving"]:
+                        if sec - hist["last_walking_alert"] >= 10.0:
+                            hist["last_walking_alert"] = sec
                             yield {
                                 "track_id": t_id,
-                                "activity_type": "sitting",
+                                "activity_type": "walking",
                                 "timestamp": sec,
                                 "bbox": det["bbox"],
                                 "severity": "info",
                                 "frame": frame
                             }
 
-            # Occupancy Limit Alert & Frame Annotation
-            person_centers = [det["center"] for det in current_detections]
-            headcount = occupancy_tracker.calculate_occupancy(person_centers, polygon_np)
+                    # Sitting alert
+                    if detect_sitting:
+                        is_sitting = False
+                        if not det["is_horizontal"] and not det["is_moving"]:
+                            if 0.7 <= det["aspect_ratio"] <= 1.4:
+                                is_sitting = True
+                            
+                            has_knees = conf[13] > 0.5 and conf[14] > 0.5
+                            if has_hips and has_knees:
+                                hip_y = (xy[11][1] + xy[12][1]) / 2.0
+                                knee_y = (xy[13][1] + xy[14][1]) / 2.0
+                                hip_x = (xy[11][0] + xy[12][0]) / 2.0
+                                knee_x = (xy[13][0] + xy[14][0]) / 2.0
+                                
+                                thigh_dy = abs(knee_y - hip_y)
+                                thigh_dx = abs(knee_x - hip_x)
+                                thigh_angle = np.degrees(np.arctan2(thigh_dy, thigh_dx + 1e-6))
+                                if thigh_angle < 45.0:
+                                    is_sitting = True
+                        
+                        if is_sitting:
+                            if sec - hist.get("last_sitting_alert", -10.0) >= 10.0:
+                                hist["last_sitting_alert"] = sec
+                                yield {
+                                    "track_id": t_id,
+                                    "activity_type": "sitting",
+                                    "timestamp": sec,
+                                    "bbox": det["bbox"],
+                                    "severity": "info",
+                                    "frame": frame
+                                }
 
-            # Draw detections and ROI polygon on output frame
-            if polygon_np is not None:
-                cv2.polylines(frame_annotated, [polygon_np], isClosed=True, color=(0, 255, 0), thickness=2)
+                # Occupancy Limit Alert & Frame Annotation
+                person_centers = [det["center"] for det in current_detections]
+                headcount = occupancy_tracker.calculate_occupancy(person_centers, polygon_np)
 
-            for det in current_detections:
-                x1, y1, x2, y2 = det["bbox"]
-                cv2.rectangle(frame_annotated, (x1, y1), (x2, y2), (255, 191, 0), 2)
+                # Draw detections and ROI polygon on output frame
+                if polygon_np is not None:
+                    cv2.polylines(frame_annotated, [polygon_np], isClosed=True, color=(0, 255, 0), thickness=2)
 
-            if detect_occupancy:
-                hud_color = (0, 0, 255) if headcount > occupancy_limit else (0, 255, 0)
-                cv2.putText(
-                    frame_annotated,
-                    f"Occupancy: {headcount} / Limit: {occupancy_limit}",
-                    (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    hud_color,
-                    2,
-                )
+                for det in current_detections:
+                    x1, y1, x2, y2 = det["bbox"]
+                    cv2.rectangle(frame_annotated, (x1, y1), (x2, y2), (255, 191, 0), 2)
 
-                if headcount > occupancy_limit:
-                    if sec - last_occupancy_alert >= 5.0:
-                        last_occupancy_alert = sec
-                        yield {
-                            "track_id": None,
-                            "activity_type": f"Occupancy Limit Exceeded ({headcount} > {occupancy_limit})",
-                            "timestamp": sec,
-                            "bbox": None,
-                            "severity": "warning",
-                            "frame": frame_annotated,
-                            "headcount": headcount,
-                            "occupancy_limit": occupancy_limit
-                        }
+                if detect_occupancy:
+                    hud_color = (0, 0, 255) if headcount > occupancy_limit else (0, 255, 0)
+                    cv2.putText(
+                        frame_annotated,
+                        f"Occupancy: {headcount} / Limit: {occupancy_limit}",
+                        (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        hud_color,
+                        2,
+                    )
 
-            if writer is not None:
-                writer.write(frame_annotated)
+                    if headcount > occupancy_limit:
+                        if sec - last_occupancy_alert >= 5.0:
+                            last_occupancy_alert = sec
+                            yield {
+                                "track_id": None,
+                                "activity_type": f"Occupancy Limit Exceeded ({headcount} > {occupancy_limit})",
+                                "timestamp": sec,
+                                "bbox": None,
+                                "severity": "warning",
+                                "frame": frame_annotated,
+                                "headcount": headcount,
+                                "occupancy_limit": occupancy_limit
+                            }
+
+                if writer is not None:
+                    writer.write(frame_annotated)
         finally:
             if writer is not None:
                 writer.release()

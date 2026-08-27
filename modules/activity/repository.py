@@ -25,6 +25,8 @@ class ActivityRepository:
         detect_loitering: bool, loitering_threshold: float,
         detect_occupancy: bool, occupancy_limit: int,
         detect_sleeping: bool, detect_walking: bool,
+        detect_sitting: bool, detect_fighting: bool,
+        detect_smoking: bool, detect_phone_usage: bool,
         selected_activities: Optional[List[str]] = None
     ) -> ActivityConfig:
         """Create or update ROI/detection configurations for a gallery media source."""
@@ -43,6 +45,10 @@ class ActivityRepository:
                 occupancy_limit=occupancy_limit,
                 detect_sleeping=detect_sleeping,
                 detect_walking=detect_walking,
+                detect_sitting=detect_sitting,
+                detect_fighting=detect_fighting,
+                detect_smoking=detect_smoking,
+                detect_phone_usage=detect_phone_usage,
                 selected_activities=selected_activities
             )
             self.db.add(config)
@@ -57,6 +63,10 @@ class ActivityRepository:
             config.occupancy_limit = occupancy_limit
             config.detect_sleeping = detect_sleeping
             config.detect_walking = detect_walking
+            config.detect_sitting = detect_sitting
+            config.detect_fighting = detect_fighting
+            config.detect_smoking = detect_smoking
+            config.detect_phone_usage = detect_phone_usage
             config.selected_activities = selected_activities
         await self.db.flush()
         return config
@@ -86,7 +96,8 @@ class ActivityRepository:
         activity_type: Optional[str] = None, severity: Optional[str] = None
     ) -> List[ActivityAlert]:
         """Query detected activity alerts with optional filters."""
-        stmt = select(ActivityAlert).where(
+        from sqlalchemy.orm import selectinload
+        stmt = select(ActivityAlert).options(selectinload(ActivityAlert.gallery_media)).where(
             ActivityAlert.tenant_id == tenant_id,
             ActivityAlert.is_delete == False
         )

@@ -48,6 +48,14 @@ def process_activity_media_task(media_id_str: str, interval: float = 0.033):
             await db.commit()
             logger.info(f"Media {media_id_str} status updated to 'processing'")
 
+            # Invalidate gallery media list cache
+            try:
+                from database.redis import delete_cached
+                for suffix in ["", ":all", ":photo", ":video"]:
+                    await delete_cached(f"gallery_media_list:{media.tenant_id}{suffix}")
+            except Exception as ce:
+                logger.warning(f"Failed to invalidate cache at task start: {ce}")
+
             # 2. Fetch config
             stmt_cfg = select(ActivityConfig).where(
                 ActivityConfig.gallery_media_id == media.id,
@@ -66,6 +74,10 @@ def process_activity_media_task(media_id_str: str, interval: float = 0.033):
             occupancy_limit = 5
             detect_sleeping = True
             detect_walking = True
+            detect_sitting = False
+            detect_fighting = False
+            detect_smoking = False
+            detect_phone_usage = False
             selected_activities = None
 
             if config:
@@ -79,8 +91,12 @@ def process_activity_media_task(media_id_str: str, interval: float = 0.033):
                 occupancy_limit = config.occupancy_limit
                 detect_sleeping = config.detect_sleeping
                 detect_walking = config.detect_walking
+                detect_sitting = config.detect_sitting
+                detect_fighting = config.detect_fighting
+                detect_smoking = config.detect_smoking
+                detect_phone_usage = config.detect_phone_usage
                 selected_activities = config.selected_activities
-                logger.info(f"Loaded ActivityConfig from database: detect_fall={detect_fall}, detect_aggression={detect_aggression}, detect_intrusion={detect_intrusion}, detect_loitering={detect_loitering}")
+                logger.info(f"Loaded ActivityConfig from database: detect_fall={detect_fall}, detect_aggression={detect_aggression}, detect_intrusion={detect_intrusion}, detect_loitering={detect_loitering}, detect_sitting={detect_sitting}")
             else:
                 logger.warning(f"No ActivityConfig record found for media_id={media_id_str}. Falling back to default configuration.")
 
@@ -140,8 +156,19 @@ def process_activity_media_task(media_id_str: str, interval: float = 0.033):
                                 target_labels.add("walk")
                                 target_labels.add("run/jog")
                                 target_labels.add("stand")
-                                target_labels.add("crouch/kneel")
                                 target_labels.add("bend/bow (at the waist)")
+                            if detect_sitting:
+                                target_labels.add("sit")
+                                target_labels.add("crouch/kneel")
+                            if detect_fighting:
+                                target_labels.add("fight/hit (a person)")
+                                target_labels.add("push (another person)")
+                                target_labels.add("grab (a person)")
+                            if detect_smoking:
+                                target_labels.add("smoke")
+                            if detect_phone_usage:
+                                target_labels.add("text on/look at a cellphone")
+                                target_labels.add("answer phone")
                             if not target_labels:
                                 exclusions = {1, 3, 17, 37, 43, 45, 46, 47, 59, 65, 74, 77, 78, 79, 80}
                                 target_labels = {
@@ -233,6 +260,10 @@ def process_activity_media_task(media_id_str: str, interval: float = 0.033):
                         occupancy_limit=occupancy_limit,
                         detect_sleeping=detect_sleeping,
                         detect_walking=detect_walking,
+                        detect_sitting=detect_sitting,
+                        detect_fighting=detect_fighting,
+                        detect_smoking=detect_smoking,
+                        detect_phone_usage=detect_phone_usage,
                         interval=interval,
                         selected_activities=selected_activities
                     ):
@@ -284,9 +315,25 @@ def process_activity_media_task(media_id_str: str, interval: float = 0.033):
                 await db.commit()
                 logger.info(f"Activity detection task finished successfully for media_id={media_id_str}")
 
+                # Invalidate gallery media list cache
+                try:
+                    from database.redis import delete_cached
+                    for suffix in ["", ":all", ":photo", ":video"]:
+                        await delete_cached(f"gallery_media_list:{media.tenant_id}{suffix}")
+                except Exception as ce:
+                    logger.warning(f"Failed to invalidate cache at task success: {ce}")
+
             except Exception as e:
                 logger.exception(f"Exception occurred in activity detection task for media_id={media_id_str}: {e}")
                 media.status = "failed"
                 await db.commit()
+
+                # Invalidate gallery media list cache
+                try:
+                    from database.redis import delete_cached
+                    for suffix in ["", ":all", ":photo", ":video"]:
+                        await delete_cached(f"gallery_media_list:{media.tenant_id}{suffix}")
+                except Exception as ce:
+                    logger.warning(f"Failed to invalidate cache at task failure: {ce}")
 
     run_async(run())
