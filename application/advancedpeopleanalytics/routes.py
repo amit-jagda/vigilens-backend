@@ -1,8 +1,8 @@
 import uuid
 import datetime
 import os
-from typing import List
-from fastapi import APIRouter, Depends, status, HTTPException, Query
+from typing import List, Optional
+from fastapi import APIRouter, Depends, status, HTTPException, Query, File, UploadFile, Form
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,11 +20,14 @@ from application.advancedpeopleanalytics.schema import (
     RegisterVisitorRequest,
     CameraNodeCreate,
     CameraNodeResponse,
+    CameraNodeLinkCreate,
+    CameraNodeLinkResponse,
     CameraZoneCreate,
     CameraZoneResponse,
     CameraZoneLinkCreate,
     CameraZoneLinkResponse,
     PersonTimelineResponse,
+    PersonSummaryItem,
     AssociationRequest
 )
 
@@ -42,7 +45,7 @@ def verify_tenant(user: User) -> uuid.UUID:
 
 
 # ==========================================
-# CAMERA & SPATIAL ZONES ENDPOINTS
+# CAMERA & SPATIAL TOPOLOGY ENDPOINTS
 # ==========================================
 
 @router.post(
@@ -81,6 +84,74 @@ async def list_camera_nodes(
         message=f"Retrieved {len(nodes)} CameraNode(s).",
         status=status.HTTP_200_OK,
         data=[CameraNodeResponse.model_validate(n) for n in nodes]
+    )
+
+
+@router.post(
+    "/cameras/links",
+    response_model=StandardResponse[CameraNodeLinkResponse],
+    status_code=status.HTTP_201_CREATED
+)
+async def create_camera_link(
+    data: CameraNodeLinkCreate,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Creates a directed spatial connection between two Camera Nodes with transit time window constraints.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    link = await service.create_camera_node_link(tenant_id, data)
+    return StandardResponse(
+        message="Camera-to-Camera link created successfully.",
+        status=status.HTTP_201_CREATED,
+        data=link
+    )
+
+
+@router.get(
+    "/cameras/links",
+    response_model=StandardResponse[List[CameraNodeLinkResponse]],
+    status_code=status.HTTP_200_OK
+)
+async def list_camera_links(
+    current_user: User = Depends(require_viewer),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Lists all Camera-to-Camera connections and spatial graph edges for the tenant.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    links = await service.get_camera_node_links(tenant_id)
+    return StandardResponse(
+        message=f"Retrieved {len(links)} CameraLink(s).",
+        status=status.HTTP_200_OK,
+        data=links
+    )
+
+
+@router.delete(
+    "/cameras/links/{link_id}",
+    response_model=StandardResponse[None],
+    status_code=status.HTTP_200_OK
+)
+async def delete_camera_link(
+    link_id: uuid.UUID,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Deletes a Camera-to-Camera connection.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    await service.delete_camera_node_link(link_id, tenant_id)
+    return StandardResponse(
+        message="Camera link deleted successfully.",
+        status=status.HTTP_200_OK,
+        data=None
     )
 
 
@@ -178,7 +249,7 @@ async def trigger_cross_camera_association(
 async def get_person_journey_timeline(
     person_type: str = Query(..., description="'employee' or 'visitor'"),
     person_id: uuid.UUID = Query(..., description="UUID of employee or visitor identity"),
-    date: datetime.date = Query(..., description="Target date (YYYY-MM-DD)"),
+    date: Optional[datetime.date] = Query(None, description="Optional target date (YYYY-MM-DD)"),
     current_user: User = Depends(require_viewer),
     db: AsyncSession = Depends(get_db)
 ):
@@ -192,6 +263,132 @@ async def get_person_journey_timeline(
         message="Person journey timeline retrieved successfully.",
         status=status.HTTP_200_OK,
         data=timeline
+    )
+
+
+@router.get(
+    "/people",
+    response_model=StandardResponse[List[PersonSummaryItem]],
+    status_code=status.HTTP_200_OK
+)
+async def list_people_directory(
+    date: Optional[datetime.date] = Query(None, description="Optional target date filter (YYYY-MM-DD)"),
+    person_type: Optional[str] = Query(None, description="'employee' or 'visitor'"),
+    search: Optional[str] = Query(None, description="Search query by name, ID, or employee code"),
+    current_user: User = Depends(require_viewer),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    List all detected individuals across cameras with dwell times, cameras visited, and latest status.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    people = await service.get_tenant_people_summary(
+        tenant_id=tenant_id,
+        target_date=date,
+        person_type=person_type,
+        search=search
+    )
+    return StandardResponse(
+        message=f"Retrieved {len(people)} person profile(s).",
+        status=status.HTTP_200_OK,
+        data=[PersonSummaryItem.model_validate(p) for p in people]
+    )
+
+
+@router.post(
+    "/reset",
+    response_model=StandardResponse[dict],
+    status_code=status.HTTP_200_OK
+)
+async def reset_all_analytics_data(
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Clears all stored sessions, person identities, appearance/face embeddings, and timeline history.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    result = await service.reset_all_analytics_data(tenant_id)
+    return StandardResponse(
+        message=result["message"],
+        status=status.HTTP_200_OK,
+        data=result
+    )
+
+
+# ==========================================
+# VISITOR & PERSON REGISTRATION
+# ==========================================
+
+@router.post(
+    "/visitors/register",
+    response_model=StandardResponse[dict],
+    status_code=status.HTTP_200_OK
+)
+async def register_or_update_visitor(
+    data: RegisterVisitorRequest,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Update visitor name or convert a detected visitor to an employee.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    result = await service.register_or_update_visitor(
+        tenant_id=tenant_id,
+        identity_id=data.identity_id,
+        first_name=data.first_name,
+        last_name=data.last_name,
+        registration_type=data.registration_type,
+        employee_code=data.employee_code
+    )
+    return StandardResponse(
+        message=result["message"],
+        status=status.HTTP_200_OK,
+        data=result
+    )
+
+
+@router.post(
+    "/visitors/add-from-face",
+    response_model=StandardResponse[dict],
+    status_code=status.HTTP_201_CREATED
+)
+async def add_person_from_face_photo(
+    file: UploadFile = File(...),
+    first_name: str = Form(...),
+    last_name: str = Form(...),
+    registration_type: str = Form("visitor"),
+    employee_code: Optional[str] = Form(None),
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Directly enroll a new person (Visitor or Employee) by uploading a clear face photo.
+    """
+    tenant_id = verify_tenant(current_user)
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded face photo is empty."
+        )
+    service = AdvancedPeopleAnalyticsService(db)
+    result = await service.add_person_from_face_photo(
+        tenant_id=tenant_id,
+        image_bytes=contents,
+        first_name=first_name,
+        last_name=last_name,
+        registration_type=registration_type,
+        employee_code=employee_code
+    )
+    return StandardResponse(
+        message=result["message"],
+        status=status.HTTP_201_CREATED,
+        data=result
     )
 
 

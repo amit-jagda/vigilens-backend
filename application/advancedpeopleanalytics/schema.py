@@ -23,6 +23,31 @@ class CameraNodeResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class CameraNodeLinkCreate(BaseModel):
+    from_camera_id: uuid.UUID
+    to_camera_id: uuid.UUID
+    min_transit_seconds: float = Field(5.0, ge=0.0)
+    avg_transit_seconds: float = Field(30.0, ge=0.0)
+    max_transit_seconds: float = Field(300.0, ge=0.0)
+    is_bidirectional: bool = Field(False, description="If true, also creates reverse link to_camera -> from_camera")
+
+
+class CameraNodeLinkResponse(BaseModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    from_camera_id: uuid.UUID
+    to_camera_id: uuid.UUID
+    from_camera_name: Optional[str] = None
+    to_camera_name: Optional[str] = None
+    min_transit_seconds: float
+    avg_transit_seconds: float
+    max_transit_seconds: float
+    created_at: datetime.datetime
+    update_at: datetime.datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class CameraZoneCreate(BaseModel):
     zone_type: str = Field(..., example="exit") # "entry" | "exit" | "crossing"
     label: str = Field(..., example="Lobby Main Exit Gate")
@@ -168,13 +193,19 @@ class AdvancedPeopleAnalyticsSessionResponse(BaseModel):
 
 
 class SessionDetectedPerson(BaseModel):
-    identity_id: uuid.UUID
+    identity_id: Optional[uuid.UUID] = None
+    employee_id: Optional[uuid.UUID] = None
     person_type: str
     name: str
+    tracker_id: int
     crop_url: Optional[str] = None
     first_seen: float
     last_seen: float
-    occurrences_count: int
+    started_at: Optional[datetime.datetime] = None
+    ended_at: Optional[datetime.datetime] = None
+    confidence: float = 1.0
+    identity_source: str = "tracking"
+    camera_name: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -215,3 +246,20 @@ class RegisterVisitorRequest(BaseModel):
     registration_type: str = Field("visitor", example="visitor")
     employee_code: Optional[str] = None
     department: Optional[str] = None
+
+
+class PersonSummaryItem(BaseModel):
+    person_type: str  # "employee" | "visitor"
+    person_id: uuid.UUID
+    name: str
+    employee_code: Optional[str] = None
+    crop_url: Optional[str] = None
+    total_dwell_seconds: float
+    camera_stops_count: int
+    cameras_visited: List[str]
+    first_seen_at: datetime.datetime
+    last_seen_at: datetime.datetime
+    latest_event_type: str = "presence"
+
+    model_config = ConfigDict(from_attributes=True)
+

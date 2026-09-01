@@ -107,7 +107,7 @@ class AdvancedEmployeeAttendanceLog(BaseModel):
 
 class AdvancedPersonIdentity(BaseModel):
     """
-    Represents a unique visitor tracked across runs (class_id=0 for ReID body/fusion, 1 for Face-only).
+    Represents a unique visitor or employee tracked across runs (class_id=0 for ReID body/fusion, 1 for Face-only).
     """
     __tablename__ = "advanced_person_identities"
 
@@ -115,7 +115,11 @@ class AdvancedPersonIdentity(BaseModel):
     class_id: Mapped[int] = mapped_column(Integer, default=0) # 0 = person/ReID, 1 = face
     first_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     last_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    visitor_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    is_employee: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    employee_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
 
+    employee: Mapped[Optional["Employee"]] = relationship()
     embeddings: Mapped[list["AdvancedPersonEmbedding"]] = relationship(
         back_populates="identity", cascade="all, delete-orphan"
     )
@@ -244,6 +248,35 @@ class CameraNode(BaseModel):
 
     sessions: Mapped[list["AdvancedPeopleAnalyticsSession"]] = relationship(back_populates="camera_node")
     zones: Mapped[list["CameraZone"]] = relationship(back_populates="camera", cascade="all, delete-orphan")
+    outgoing_node_links: Mapped[list["CameraNodeLink"]] = relationship(
+        "CameraNodeLink",
+        foreign_keys="[CameraNodeLink.from_camera_id]",
+        back_populates="from_camera",
+        cascade="all, delete-orphan"
+    )
+    incoming_node_links: Mapped[list["CameraNodeLink"]] = relationship(
+        "CameraNodeLink",
+        foreign_keys="[CameraNodeLink.to_camera_id]",
+        back_populates="to_camera",
+        cascade="all, delete-orphan"
+    )
+
+
+class CameraNodeLink(BaseModel):
+    """
+    Represents directed spatial connections and travel time parameters between camera nodes (Camera-to-Camera Topology).
+    """
+    __tablename__ = "camera_node_links"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    from_camera_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("camera_nodes.id", ondelete="CASCADE"), nullable=False)
+    to_camera_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("camera_nodes.id", ondelete="CASCADE"), nullable=False)
+    min_transit_seconds: Mapped[float] = mapped_column(Float, default=5.0, nullable=False)
+    avg_transit_seconds: Mapped[float] = mapped_column(Float, default=30.0, nullable=False)
+    max_transit_seconds: Mapped[float] = mapped_column(Float, default=300.0, nullable=False)
+
+    from_camera: Mapped["CameraNode"] = relationship(foreign_keys=[from_camera_id], back_populates="outgoing_node_links")
+    to_camera: Mapped["CameraNode"] = relationship(foreign_keys=[to_camera_id], back_populates="incoming_node_links")
 
 
 class CameraZone(BaseModel):
@@ -342,3 +375,10 @@ class PersonTimelineEvent(BaseModel):
     identity_source: Mapped[str] = mapped_column(String(50), nullable=False) # 'face' | 'reid' | 'face+reid' | 'tracking'
     identity_confidence: Mapped[float] = mapped_column(Float, default=1.0)
     tracker_id: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    @property
+    def duration_seconds(self) -> float:
+        if hasattr(self, "ended_at") and hasattr(self, "started_at") and self.ended_at and self.started_at:
+            return max(0.0, float((self.ended_at - self.started_at).total_seconds()))
+        return 0.0
+

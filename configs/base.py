@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     # YOLO Configuration
     YOLO_MODEL: str = "models/yolo26n.pt"
     YOLO_IMGSZ: int = 384
+
+    # Advanced People Analytics Configuration
+    ADVANCED_FACE_SIMILARITY_THRESHOLD: float = 0.45
+    ADVANCED_REID_SIMILARITY_THRESHOLD: float = 0.80
+    ADVANCED_FACE_MIN_SIZE: int = 35
+    ADVANCED_FACE_MIN_DET_SCORE: float = 0.60
+    ADVANCED_CROSS_CAMERA_MIN_SCORE: float = 0.65
     
     model_config = SettingsConfigDict(
         env_file=".env",

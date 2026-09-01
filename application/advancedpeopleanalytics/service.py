@@ -10,6 +10,7 @@ from application.advancedpeopleanalytics.model import (
     AdvancedPeopleAnalyticsSession,
     AdvancedVisitorAttendanceLog,
     CameraNode,
+    CameraNodeLink,
     CameraZone,
     CameraZoneLink,
     PersonTimelineEvent
@@ -23,6 +24,8 @@ from application.advancedpeopleanalytics.schema import (
     RegisterVisitorRequest,
     CameraNodeCreate,
     CameraNodeResponse,
+    CameraNodeLinkCreate,
+    CameraNodeLinkResponse,
     CameraZoneCreate,
     CameraZoneResponse,
     CameraZoneLinkCreate,
@@ -40,7 +43,7 @@ class AdvancedPeopleAnalyticsService:
         self.db = db
 
     # ==========================================
-    # CAMERA TOPOLOGY & SPATIAL ZONES
+    # CAMERA TOPOLOGY & SPATIAL GRAPH
     # ==========================================
 
     async def create_camera_node(self, tenant_id: uuid.UUID, data: CameraNodeCreate) -> CameraNode:
@@ -55,6 +58,85 @@ class AdvancedPeopleAnalyticsService:
 
     async def get_camera_nodes(self, tenant_id: uuid.UUID) -> List[CameraNode]:
         return await self.repo.get_camera_nodes(tenant_id)
+
+    async def create_camera_node_link(self, tenant_id: uuid.UUID, data: CameraNodeLinkCreate) -> CameraNodeLinkResponse:
+        from_node = await self.repo.get_camera_node_by_id(data.from_camera_id, tenant_id)
+        to_node = await self.repo.get_camera_node_by_id(data.to_camera_id, tenant_id)
+        if not from_node or not to_node:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="One or both CameraNodes not found or access denied."
+            )
+        if data.from_camera_id == data.to_camera_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot link a camera to itself."
+            )
+
+        link = await self.repo.create_camera_node_link(
+            tenant_id=tenant_id,
+            from_camera_id=data.from_camera_id,
+            to_camera_id=data.to_camera_id,
+            min_transit_seconds=data.min_transit_seconds,
+            avg_transit_seconds=data.avg_transit_seconds,
+            max_transit_seconds=data.max_transit_seconds
+        )
+
+        if data.is_bidirectional:
+            await self.repo.create_camera_node_link(
+                tenant_id=tenant_id,
+                from_camera_id=data.to_camera_id,
+                to_camera_id=data.from_camera_id,
+                min_transit_seconds=data.min_transit_seconds,
+                avg_transit_seconds=data.avg_transit_seconds,
+                max_transit_seconds=data.max_transit_seconds
+            )
+
+        await self.db.commit()
+        await self.db.refresh(link)
+
+        return CameraNodeLinkResponse(
+            id=link.id,
+            tenant_id=link.tenant_id,
+            from_camera_id=link.from_camera_id,
+            to_camera_id=link.to_camera_id,
+            from_camera_name=from_node.name,
+            to_camera_name=to_node.name,
+            min_transit_seconds=link.min_transit_seconds,
+            avg_transit_seconds=link.avg_transit_seconds,
+            max_transit_seconds=link.max_transit_seconds,
+            created_at=link.created_at,
+            update_at=link.update_at
+        )
+
+    async def get_camera_node_links(self, tenant_id: uuid.UUID) -> List[CameraNodeLinkResponse]:
+        links = await self.repo.get_camera_node_links(tenant_id)
+        result = []
+        for l in links:
+            result.append(CameraNodeLinkResponse(
+                id=l.id,
+                tenant_id=l.tenant_id,
+                from_camera_id=l.from_camera_id,
+                to_camera_id=l.to_camera_id,
+                from_camera_name=l.from_camera.name if l.from_camera else None,
+                to_camera_name=l.to_camera.name if l.to_camera else None,
+                min_transit_seconds=l.min_transit_seconds,
+                avg_transit_seconds=l.avg_transit_seconds,
+                max_transit_seconds=l.max_transit_seconds,
+                created_at=l.created_at,
+                update_at=l.update_at
+            ))
+        return result
+
+    async def delete_camera_node_link(self, link_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
+        res = await self.repo.delete_camera_node_link(link_id, tenant_id)
+        if not res:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Camera node link not found."
+            )
+        await self.db.commit()
+        return True
 
     async def create_camera_zone(self, tenant_id: uuid.UUID, camera_id: uuid.UUID, data: CameraZoneCreate) -> CameraZone:
         node = await self.repo.get_camera_node_by_id(camera_id, tenant_id)
@@ -268,8 +350,9 @@ class AdvancedPeopleAnalyticsService:
         return session
 
     async def get_session_detected_people(self, session_id: uuid.UUID, tenant_id: uuid.UUID) -> List[SessionDetectedPerson]:
-        session = await self.get_session(session_id, tenant_id)
-        return []
+        await self.get_session(session_id, tenant_id)
+        people_data = await self.repo.get_session_detected_people(session_id, tenant_id)
+        return [SessionDetectedPerson.model_validate(p) for p in people_data]
 
     async def delete_session(self, session_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
         session = await self.get_session(session_id, tenant_id)
@@ -281,3 +364,215 @@ class AdvancedPeopleAnalyticsService:
         await self.repo.delete_session(session_id, tenant_id)
         await self.db.commit()
         return True
+
+    async def register_or_update_visitor(
+        self,
+        tenant_id: uuid.UUID,
+        identity_id: uuid.UUID,
+        first_name: str,
+        last_name: str,
+        registration_type: str = "visitor",
+        employee_code: Optional[str] = None
+    ) -> Dict[str, Any]:
+        identity = await self.repo.get_identity_by_id(identity_id, tenant_id)
+        if not identity:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Person identity not found."
+            )
+
+        full_name = f"{first_name.strip()} {last_name.strip()}"
+        if registration_type == "employee":
+            if not employee_code:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Employee code is required when registering as employee."
+                )
+            from modules.employees.model import Employee, EmployeeEmbedding
+            emp = Employee(
+                tenant_id=tenant_id,
+                first_name=first_name.strip(),
+                last_name=last_name.strip(),
+                employee_code=employee_code.strip()
+            )
+            self.db.add(emp)
+            await self.db.flush()
+
+            if identity.embeddings:
+                for emb in identity.embeddings:
+                    emp_emb = EmployeeEmbedding(
+                        employee_id=emp.id,
+                        embedding=emb.embedding
+                    )
+                    self.db.add(emp_emb)
+
+            identity.is_employee = True
+            identity.employee_id = emp.id
+            identity.visitor_name = full_name
+            await self.db.commit()
+
+            from modules.employees.cache import invalidate_employee_embeddings_cache
+            await invalidate_employee_embeddings_cache(tenant_id)
+            return {"message": f"Visitor successfully registered as Employee {full_name} ({emp.employee_code})", "employee_id": str(emp.id)}
+        else:
+            identity.visitor_name = full_name
+            await self.db.commit()
+            return {"message": f"Visitor name successfully updated to '{full_name}'", "identity_id": str(identity.id)}
+
+    async def add_person_from_face_photo(
+        self,
+        tenant_id: uuid.UUID,
+        image_bytes: bytes,
+        first_name: str,
+        last_name: str,
+        registration_type: str = "visitor",
+        employee_code: Optional[str] = None
+    ) -> Dict[str, Any]:
+        from services.ai.face_recognition import face_rec_service
+        import cv2
+        import numpy as np
+
+        # 1. Decode image and extract face embeddings
+        faces = face_rec_service.extract_faces(image_bytes)
+        if not faces:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No clear face detected in the uploaded photo. Please upload a clear frontal face image."
+            )
+        best_face = max(faces, key=lambda f: (f["bbox"][2] - f["bbox"][0]) * (f["bbox"][3] - f["bbox"][1]))
+        face_emb = best_face["embedding"]
+
+        full_name = f"{first_name.strip()} {last_name.strip()}"
+        os.makedirs("storage/visitor_crops", exist_ok=True)
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if registration_type == "employee":
+            if not employee_code:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Employee code is required for employee registration."
+                )
+            from modules.employees.model import Employee, EmployeeEmbedding
+            emp = Employee(
+                tenant_id=tenant_id,
+                first_name=first_name.strip(),
+                last_name=last_name.strip(),
+                employee_code=employee_code.strip()
+            )
+            self.db.add(emp)
+            await self.db.flush()
+
+            emp_emb = EmployeeEmbedding(
+                employee_id=emp.id,
+                embedding=face_emb
+            )
+            self.db.add(emp_emb)
+            await self.db.commit()
+
+            if img_np is not None:
+                cv2.imwrite(f"storage/visitor_crops/emp_{emp.id}.jpg", img_np)
+
+            from modules.employees.cache import invalidate_employee_embeddings_cache
+            await invalidate_employee_embeddings_cache(tenant_id)
+            return {
+                "message": f"Successfully registered Employee {full_name} ({employee_code}).",
+                "person_type": "employee",
+                "id": str(emp.id),
+                "name": full_name
+            }
+        else:
+            identity = await self.repo.create_person_identity(tenant_id=tenant_id, class_id=0)
+            identity.visitor_name = full_name
+            await self.repo.create_person_embedding(
+                identity_id=identity.id,
+                embedding=face_emb,
+                bbox=best_face["bbox"]
+            )
+            await self.db.commit()
+
+            if img_np is not None:
+                cv2.imwrite(f"storage/visitor_crops/visitor_{identity.id}.jpg", img_np)
+
+            return {
+                "message": f"Successfully registered Visitor {full_name}.",
+                "person_type": "visitor",
+                "id": str(identity.id),
+                "name": full_name
+            }
+
+    async def get_tenant_people_summary(
+        self,
+        tenant_id: uuid.UUID,
+        target_date: Optional[datetime.date] = None,
+        person_type: Optional[str] = None,
+        search: Optional[str] = None
+    ) -> List[dict]:
+        return await self.repo.get_tenant_people_summary(
+            tenant_id=tenant_id,
+            target_date=target_date,
+            person_type=person_type,
+            search=search
+        )
+
+    async def reset_all_analytics_data(self, tenant_id: uuid.UUID) -> dict:
+        """
+        Clears all analytics sessions, person embeddings, identities, timeline events, and cached progress.
+        """
+        import glob
+        from sqlalchemy import delete
+        from application.advancedpeopleanalytics.model import (
+            AdvancedPeopleAnalyticsSession,
+            AdvancedPersonIdentity,
+            AdvancedPersonEmbedding,
+            AdvancedPersonOccurrence,
+            AdvancedVisitorAttendanceLog,
+            AdvancedLineCrossingLog,
+            ZoneCrossingEvent,
+            CrossCameraIdentityLink,
+            PersonTimelineEvent
+        )
+        
+        # 1. Delete DB records
+        await self.db.execute(delete(PersonTimelineEvent).where(PersonTimelineEvent.tenant_id == tenant_id))
+        await self.db.execute(delete(CrossCameraIdentityLink).where(CrossCameraIdentityLink.tenant_id == tenant_id))
+        await self.db.execute(delete(ZoneCrossingEvent).where(ZoneCrossingEvent.tenant_id == tenant_id))
+        await self.db.execute(delete(AdvancedVisitorAttendanceLog))
+        await self.db.execute(delete(AdvancedLineCrossingLog))
+        await self.db.execute(delete(AdvancedPersonOccurrence))
+        await self.db.execute(delete(AdvancedPersonEmbedding))
+        await self.db.execute(delete(AdvancedPersonIdentity).where(AdvancedPersonIdentity.tenant_id == tenant_id))
+        await self.db.execute(delete(AdvancedPeopleAnalyticsSession).where(AdvancedPeopleAnalyticsSession.tenant_id == tenant_id))
+        await self.db.commit()
+
+        # 2. Delete crop files and outputs from disk
+        crop_patterns = [
+            "storage/visitor_crops/advanced_*",
+            "storage/visitor_crops/visitor_*",
+            "storage/visitor_crops/emp_*",
+            "storage/advanced_people_analytics_outputs/*",
+            "storage/advanced_outputs/*"
+        ]
+        for pattern in crop_patterns:
+            for f in glob.glob(pattern):
+                try:
+                    if os.path.isfile(f):
+                        os.remove(f)
+                except Exception:
+                    pass
+
+        # 3. Clear Redis progress keys
+        from database.redis import get_redis_client
+        redis_client = get_redis_client()
+        if redis_client:
+            try:
+                keys = await redis_client.keys("advancedpeopleanalytics:*")
+                if keys:
+                    await redis_client.delete(*keys)
+            except Exception:
+                pass
+
+        return {"message": "All person embeddings, video sessions, and analytics data successfully reset."}
+
+
+

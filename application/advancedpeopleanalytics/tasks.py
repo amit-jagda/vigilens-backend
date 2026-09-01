@@ -25,6 +25,8 @@ from application.advancedpeopleanalytics.model import (
     AdvancedPeopleAnalyticsSession,
     AdvancedPersonIdentity,
     AdvancedPersonEmbedding,
+    CameraNode,
+    CameraNodeLink,
     CameraZone,
     CameraZoneLink,
     ZoneCrossingEvent,
@@ -45,6 +47,7 @@ from application.utils.line_counter import LineCrossingCounter
 from application.utils.video_utils import get_video_rotation, orient_frame, probe_video
 from application.utils.face_rec import face_rec_service
 from application.utils.reid import reid_service
+from configs.base import settings
 
 ADVANCED_OUTPUTS_DIR = os.path.join("storage", "advanced_people_analytics_outputs")
 os.makedirs(ADVANCED_OUTPUTS_DIR, exist_ok=True)
@@ -222,6 +225,7 @@ async def _process_video_job(
         base_time = session.recording_started_at or datetime.now(timezone.utc)
         return base_time + timedelta(seconds=video_sec)
 
+    employee_dict = {str(emp.id): emp for emp, emb in (employee_cache or []) if hasattr(emp, "id")}
     active_tracks = {}
     occupancy_history = []
     peak_occupancy_so_far = 0
@@ -285,11 +289,20 @@ async def _process_video_job(
                         "current_zones": set(),
                         "face_confirmed": False
                     }
+                    if body_crop is not None and body_crop.size > 0:
+                        try:
+                            os.makedirs(VISITOR_CROPS_DIR, exist_ok=True)
+                            crop_fname = f"advanced_{session.id}_{tracker_id}.jpg"
+                            crop_fpath = os.path.join(VISITOR_CROPS_DIR, crop_fname)
+                            if not os.path.exists(crop_fpath):
+                                cv2.imwrite(crop_fpath, body_crop)
+                        except Exception:
+                            pass
                 track_info = active_tracks[tracker_id]
                 track_info["last_seen"] = timestamp_sec
 
-                # Extract ReID & Face embedding every frame_step
-                if frame_idx % frame_step == 0 and (not track_info["face_confirmed"] or track_info["person_type"] == "visitor"):
+                # Extract ReID & Face embedding every frame_step only if face is not yet confirmed
+                if frame_idx % frame_step == 0 and not track_info["face_confirmed"]:
                     body_crop = frame[y1:y2, x1:x2]
                     if body_crop is not None and body_crop.size > 0:
                         # Extract 512D ReID Embedding
@@ -312,24 +325,45 @@ async def _process_video_job(
                             except Exception:
                                 faces = []
 
+                        # Configurable Face Quality Filter via env (default: 35px, 0.60 score)
+                        min_face_size = int(os.getenv("ADVANCED_FACE_MIN_SIZE", getattr(settings, "ADVANCED_FACE_MIN_SIZE", 35)))
+                        min_face_det_score = float(os.getenv("ADVANCED_FACE_MIN_DET_SCORE", getattr(settings, "ADVANCED_FACE_MIN_DET_SCORE", 0.60)))
+
                         valid_faces = []
                         for face in faces:
                             fx1, fy1, fx2, fy2 = map(int, face["bbox"])
-                            if (fx2 - fx1) >= 35 and (fy2 - fy1) >= 35 and face.get("det_score", 0.0) >= 0.65:
+                            if (fx2 - fx1) >= min_face_size and (fy2 - fy1) >= min_face_size and face.get("det_score", 0.0) >= min_face_det_score:
                                 valid_faces.append(face)
 
+                        matched_face = None
+                        face_embedding = None
                         if valid_faces:
                             matched_face = max(valid_faces, key=lambda f: (f["bbox"][2] - f["bbox"][0]) * (f["bbox"][3] - f["bbox"][1]))
                             face_embedding = np.array(matched_face["embedding"], dtype=np.float32)
-                            mapped_threshold = map_similarity_threshold(similarity_threshold)
+                            try:
+                                crop_fname = f"advanced_{session.id}_{tracker_id}.jpg"
+                                cv2.imwrite(os.path.join(VISITOR_CROPS_DIR, crop_fname), face_crop)
+                            except Exception:
+                                pass
 
-                            # 1. Match against registered employees cache
-                            match_emp = None
-                            if track_employees and employee_cache:
-                                match_emp = find_best_match_in_cache(face_embedding, employee_cache, mapped_threshold)
+                        # Separate dedicated thresholds for Face (ArcFace) vs Body ReID (OSNet), configurable via env
+                        env_face_thresh = os.getenv("ADVANCED_FACE_SIMILARITY_THRESHOLD")
+                        FACE_SIMILARITY_THRESHOLD = float(env_face_thresh) if env_face_thresh is not None else map_similarity_threshold(similarity_threshold)
+                        REID_SIMILARITY_THRESHOLD = float(os.getenv("ADVANCED_REID_SIMILARITY_THRESHOLD", getattr(settings, "ADVANCED_REID_SIMILARITY_THRESHOLD", 0.80)))
 
-                            if match_emp:
-                                employee, sim = match_emp
+                        # PHASE 1: Try Face Recognition against Employee Cache if clear face is available
+                        match_emp = None
+                        if track_employees and employee_cache and face_embedding is not None:
+                            match_emp = find_best_match_in_cache(face_embedding, employee_cache, FACE_SIMILARITY_THRESHOLD)
+
+                        if match_emp:
+                            employee, sim = match_emp
+                            # Prevent same-frame identity collision: Ensure another active track hasn't claimed this employee
+                            claimed_by_other = any(
+                                t_id != tracker_id and t.get("employee_id") == employee.id and t.get("face_confirmed")
+                                for t_id, t in active_tracks.items()
+                            )
+                            if not claimed_by_other:
                                 track_info["person_type"] = "employee"
                                 track_info["employee_id"] = employee.id
                                 track_info["employee_name"] = f"{employee.first_name} {employee.last_name}"
@@ -337,32 +371,67 @@ async def _process_video_job(
                                 track_info["identity_source"] = "face"
                                 track_info["identity_confidence"] = float(sim)
                                 track_info["face_confirmed"] = True
-                            else:
-                                # 2. Match or create visitor
-                                match_vis = None
-                                if track_repeat_visitors and track_info["reid_embedding"]:
-                                    match_vis = await repo.find_similar_visitor(
-                                        session.tenant_id, track_info["reid_embedding"], mapped_threshold, class_id=0
+
+                                # Register/retrieve employee identity in Advanced Analytics
+                                emp_identity = await repo.get_or_create_employee_identity(
+                                    tenant_id=session.tenant_id,
+                                    employee_id=employee.id,
+                                    employee_name=track_info["employee_name"]
+                                )
+                                track_info["identity_id"] = emp_identity.id
+
+                                # Save Today's Body/Clothes Appearance Embedding ONLY on genuine face confirmation
+                                if track_info["reid_embedding"]:
+                                    await repo.create_person_embedding(
+                                        identity_id=emp_identity.id,
+                                        embedding=track_info["reid_embedding"],
+                                        bbox=[x1, y1, x2, y2],
+                                        timestamp=timestamp_sec
                                     )
-                                if match_vis:
-                                    visitor, sim = match_vis
+
+                        # PHASE 2: If no face matched or face is not visible, check Full-Body ReID Appearance with strict 0.82 threshold
+                        elif track_info["reid_embedding"] and not track_info["face_confirmed"]:
+                            match_vis = None
+                            if track_repeat_visitors:
+                                match_vis = await repo.find_similar_visitor(
+                                    session.tenant_id, track_info["reid_embedding"], REID_SIMILARITY_THRESHOLD, class_id=0
+                                )
+                            if match_vis:
+                                visitor, sim = match_vis
+                                # Prevent same-frame identity collision
+                                claimed_by_other = any(
+                                    t_id != tracker_id and t.get("identity_id") == visitor.id
+                                    for t_id, t in active_tracks.items()
+                                )
+                                if not claimed_by_other:
                                     track_info["identity_id"] = visitor.id
                                     track_info["identity_source"] = "reid"
                                     track_info["identity_confidence"] = float(sim)
-                                elif register_new_visitors and track_info["reid_embedding"]:
-                                    visitor = await repo.create_person_identity(session.tenant_id, class_id=0)
-                                    track_info["identity_id"] = visitor.id
-                                    track_info["identity_source"] = "reid"
-                                    track_info["identity_confidence"] = 0.80
+                                    if visitor.is_employee and visitor.employee_id:
+                                        track_info["person_type"] = "employee"
+                                        track_info["employee_id"] = visitor.employee_id
+                                        emp_obj = employee_dict.get(str(visitor.employee_id))
+                                        if emp_obj:
+                                            track_info["employee_name"] = f"{emp_obj.first_name} {emp_obj.last_name}"
+                                            track_info["employee_code"] = emp_obj.employee_code
+                                        else:
+                                            track_info["employee_name"] = visitor.visitor_name or "Employee"
+                                    elif visitor.visitor_name:
+                                        track_info["visitor_name"] = visitor.visitor_name
 
-                                # Update appearance vector ONLY IF identity_confidence >= 0.85 and face confirmed
-                                if track_info["identity_id"] and track_info["identity_confidence"] >= 0.85 and track_info["face_confirmed"]:
-                                    await repo.create_person_embedding(
-                                        identity_id=track_info["identity_id"],
-                                        embedding=face_embedding.tolist(),
-                                        bbox=matched_face["bbox"],
-                                        timestamp=timestamp_sec
-                                    )
+                            elif register_new_visitors and track_info["identity_id"] is None:
+                                visitor = await repo.create_person_identity(session.tenant_id, class_id=0)
+                                track_info["identity_id"] = visitor.id
+                                track_info["identity_source"] = "reid"
+                                track_info["identity_confidence"] = 0.40  # Initial unverified visitor confidence
+
+                                await repo.create_person_embedding(
+                                    identity_id=visitor.id,
+                                    embedding=track_info["reid_embedding"],
+                                    bbox=[x1, y1, x2, y2],
+                                    timestamp=timestamp_sec
+                                )
+
 
                 # Check Virtual Line Crossing Vector
                 if line_counter:
@@ -405,7 +474,13 @@ async def _process_video_job(
                     emp_code = track_info.get("employee_code", "")
                     sim_pct = int(track_info["identity_confidence"] * 100)
                     code_str = f" [{emp_code}]" if emp_code else ""
-                    label = f"#{tracker_id} | {emp_name}{code_str} ({sim_pct}%)"
+                    source_str = " (ReID)" if track_info.get("identity_source") == "reid" else ""
+                    label = f"#{tracker_id} | {emp_name}{code_str}{source_str} ({sim_pct}%)"
+                elif track_info.get("visitor_name"):
+                    color = (255, 215, 0) # Cyan for Named Visitor
+                    v_name = track_info["visitor_name"]
+                    sim_pct = int(track_info["identity_confidence"] * 100)
+                    label = f"#{tracker_id} | {v_name} ({sim_pct}%)"
                 elif track_info["identity_source"] == "reid":
                     color = (255, 215, 0) # Cyan for ReID matched Visitor
                     label = f"#{tracker_id} | Vis ReID ({int(track_info['identity_confidence']*100)}%)"
@@ -519,8 +594,9 @@ async def _process_video_job(
 @celery_app.task(name="application.advancedpeopleanalytics.tasks.run_cross_camera_association_task")
 def run_cross_camera_association_task(session_id_str: str):
     """
-    Celery task that matches exit zone events from this session against linked entry zone events
-    across other cameras within the spatio-temporal transit window.
+    Celery task that matches person tracks from this session across linked destination camera nodes
+    (Camera-to-Camera Topology) within spatio-temporal transit windows.
+    Also supports employee identity transfer across camera feeds.
     """
     session_id = uuid.UUID(session_id_str)
 
@@ -528,28 +604,121 @@ def run_cross_camera_association_task(session_id_str: str):
         async with SessionLocal() as db:
             repo = AdvancedPeopleAnalyticsRepository(db)
             
-            session = await repo.get_session_by_id(session_id, uuid.UUID(int=0)) # Skip tenant filter for system task query
-            if not session or not session.camera_node_id:
-                # Fallback search without tenant lock
-                stmt = select(AdvancedPeopleAnalyticsSession).where(
-                    AdvancedPeopleAnalyticsSession.id == session_id,
-                    AdvancedPeopleAnalyticsSession.is_delete == False
-                )
-                res = await db.execute(stmt)
-                session = res.scalars().first()
+            stmt = select(AdvancedPeopleAnalyticsSession).where(
+                AdvancedPeopleAnalyticsSession.id == session_id,
+                AdvancedPeopleAnalyticsSession.is_delete == False
+            )
+            res = await db.execute(stmt)
+            session = res.scalars().first()
 
             if not session or not session.camera_node_id:
                 return
 
-            # Fetch camera zones for this session's camera
+            tenant_id = session.tenant_id
+
+            # ----------------------------------------------------
+            # 1. CAMERA-TO-CAMERA DIRECTED TOPOLOGY LINKS
+            # ----------------------------------------------------
+            camera_links = await repo.get_camera_node_links_from(session.camera_node_id)
+
+            # Query all timeline events from this session
+            from_events_stmt = select(PersonTimelineEvent).where(
+                PersonTimelineEvent.session_id == session.id,
+                PersonTimelineEvent.is_delete == False
+            )
+            from_res = await db.execute(from_events_stmt)
+            from_events = list(from_res.scalars().all())
+
+            # For each outgoing link to target camera
+            for cam_link in camera_links:
+                target_cam_id = cam_link.to_camera_id
+                
+                # Find sessions on target camera
+                target_sess_stmt = select(AdvancedPeopleAnalyticsSession).where(
+                    AdvancedPeopleAnalyticsSession.tenant_id == tenant_id,
+                    AdvancedPeopleAnalyticsSession.camera_node_id == target_cam_id,
+                    AdvancedPeopleAnalyticsSession.is_delete == False
+                )
+                target_sess_res = await db.execute(target_sess_stmt)
+                target_sessions = list(target_sess_res.scalars().all())
+
+                for target_sess in target_sessions:
+                    # Query timeline events from target session
+                    to_events_stmt = select(PersonTimelineEvent).where(
+                        PersonTimelineEvent.session_id == target_sess.id,
+                        PersonTimelineEvent.is_delete == False
+                    )
+                    to_res = await db.execute(to_events_stmt)
+                    to_events = list(to_res.scalars().all())
+
+                    for from_evt in from_events:
+                        exit_time = from_evt.ended_at
+                        window_start = exit_time + timedelta(seconds=cam_link.min_transit_seconds)
+                        window_end = exit_time + timedelta(seconds=cam_link.max_transit_seconds)
+
+                        # Check candidate events in target camera within transit window
+                        for to_evt in to_events:
+                            if not (window_start <= to_evt.started_at <= window_end):
+                                continue
+
+                            # Fetch embeddings for from_evt and to_evt
+                            from_emb_stmt = select(AdvancedPersonEmbedding).where(
+                                AdvancedPersonEmbedding.identity_id == from_evt.identity_id,
+                                AdvancedPersonEmbedding.is_delete == False
+                            ).limit(1) if from_evt.identity_id else None
+                            to_emb_stmt = select(AdvancedPersonEmbedding).where(
+                                AdvancedPersonEmbedding.identity_id == to_evt.identity_id,
+                                AdvancedPersonEmbedding.is_delete == False
+                            ).limit(1) if to_evt.identity_id else None
+
+                            from_emb = (await db.execute(from_emb_stmt)).scalars().first() if from_emb_stmt is not None else None
+                            to_emb = (await db.execute(to_emb_stmt)).scalars().first() if to_emb_stmt is not None else None
+
+                            reid_score = 0.5
+                            if from_emb and to_emb and from_emb.embedding and to_emb.embedding:
+                                vec1 = np.array(from_emb.embedding, dtype=np.float32)
+                                vec2 = np.array(to_emb.embedding, dtype=np.float32)
+                                n1, n2 = np.linalg.norm(vec1), np.linalg.norm(vec2)
+                                if n1 > 0 and n2 > 0:
+                                    reid_score = float(np.dot(vec1, vec2) / (n1 * n2))
+
+                            actual_transit = (to_evt.started_at - exit_time).total_seconds()
+                            time_score = max(0.0, 1.0 - (abs(actual_transit - cam_link.avg_transit_seconds) / cam_link.max_transit_seconds))
+                            face_bonus = 0.15 if (from_evt.employee_id and to_evt.employee_id and from_evt.employee_id == to_evt.employee_id) else 0.0
+
+                            final_score = (0.60 * reid_score) + (0.25 * time_score) + (0.15 * face_bonus)
+                            cross_camera_min_score = float(os.getenv("ADVANCED_CROSS_CAMERA_MIN_SCORE", getattr(settings, "ADVANCED_CROSS_CAMERA_MIN_SCORE", 0.65)))
+
+                            if final_score >= cross_camera_min_score and from_evt.identity_id and to_evt.identity_id:
+                                await repo.create_cross_camera_link(
+                                    tenant_id=tenant_id,
+                                    from_session_id=from_evt.session_id,
+                                    to_session_id=to_evt.session_id,
+                                    from_identity_id=from_evt.identity_id,
+                                    to_identity_id=to_evt.identity_id,
+                                    reid_score=reid_score,
+                                    time_score=time_score,
+                                    final_score=final_score,
+                                    method="camera_topology_reid_fusion",
+                                    is_confirmed=(final_score >= 0.70)
+                                )
+
+                                # Propagate employee identity if from_evt was employee and to_evt was not yet recognized
+                                if from_evt.employee_id and not to_evt.employee_id:
+                                    to_evt.employee_id = from_evt.employee_id
+                                    to_evt.person_type = "employee"
+                                    to_evt.identity_source = "face+reid"
+                                    to_evt.identity_confidence = final_score
+
+            # ----------------------------------------------------
+            # 2. LEGACY CAMERA ZONE LINKS (FALLBACK)
+            # ----------------------------------------------------
             zones = await repo.get_camera_zones(session.camera_node_id)
             exit_zones = [z for z in zones if z.zone_type in {"exit", "crossing"}]
 
             for exit_z in exit_zones:
-                # Get outgoing links to other camera zones
                 links = await repo.get_zone_links_from(exit_z.id)
                 for link in links:
-                    # Query exit events from exit_z
                     start_t = session.recording_started_at or (datetime.now(timezone.utc) - timedelta(hours=24))
                     end_t = session.completed_at or datetime.now(timezone.utc)
                     exit_events = await repo.get_zone_crossing_events(exit_z.id, start_t, end_t)
@@ -558,27 +727,21 @@ def run_cross_camera_association_task(session_id_str: str):
                         if not exit_evt.reid_embedding:
                             continue
 
-                        # Target time window: exit_time + 5s to exit_time + max_transit_seconds
                         window_start = exit_evt.real_world_time + timedelta(seconds=5)
                         window_end = exit_evt.real_world_time + timedelta(seconds=link.max_transit_seconds)
-
                         entry_events = await repo.get_zone_crossing_events(link.to_zone_id, window_start, window_end)
 
                         for entry_evt in entry_events:
                             if not entry_evt.reid_embedding or not exit_evt.identity_id or not entry_evt.identity_id:
                                 continue
 
-                            # 1. Cosine ReID Score
                             vec1 = np.array(exit_evt.reid_embedding, dtype=np.float32)
                             vec2 = np.array(entry_evt.reid_embedding, dtype=np.float32)
                             n1, n2 = np.linalg.norm(vec1), np.linalg.norm(vec2)
                             reid_score = float(np.dot(vec1, vec2) / (n1 * n2)) if (n1 > 0 and n2 > 0) else 0.0
 
-                            # 2. Time Transit Score
                             actual_transit = (entry_evt.real_world_time - exit_evt.real_world_time).total_seconds()
                             time_score = max(0.0, 1.0 - (abs(actual_transit - link.avg_transit_seconds) / link.max_transit_seconds))
-
-                            # 3. Face Bonus
                             face_bonus = 0.15 if (exit_evt.face_confirmed and entry_evt.face_confirmed and exit_evt.identity_id == entry_evt.identity_id) else 0.0
 
                             final_score = (0.60 * reid_score) + (0.25 * time_score) + (0.15 * face_bonus)

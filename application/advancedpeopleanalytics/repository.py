@@ -16,6 +16,7 @@ from application.advancedpeopleanalytics.model import (
     AdvancedEmployeeSessionDetection,
     AdvancedUploadedVideo,
     CameraNode,
+    CameraNodeLink,
     CameraZone,
     CameraZoneLink,
     ZoneCrossingEvent,
@@ -63,6 +64,64 @@ class AdvancedPeopleAnalyticsRepository:
         )
         res = await self.db.execute(stmt)
         return res.scalars().first()
+
+    # ==========================================
+    # CAMERA-TO-CAMERA TOPOLOGY LINKS
+    # ==========================================
+
+    async def create_camera_node_link(
+        self,
+        tenant_id: uuid.UUID,
+        from_camera_id: uuid.UUID,
+        to_camera_id: uuid.UUID,
+        min_transit_seconds: float = 5.0,
+        avg_transit_seconds: float = 30.0,
+        max_transit_seconds: float = 300.0
+    ) -> CameraNodeLink:
+        link = CameraNodeLink(
+            tenant_id=tenant_id,
+            from_camera_id=from_camera_id,
+            to_camera_id=to_camera_id,
+            min_transit_seconds=min_transit_seconds,
+            avg_transit_seconds=avg_transit_seconds,
+            max_transit_seconds=max_transit_seconds
+        )
+        self.db.add(link)
+        await self.db.flush()
+        return link
+
+    async def get_camera_node_links(self, tenant_id: uuid.UUID) -> List[CameraNodeLink]:
+        stmt = select(CameraNodeLink).options(
+            selectinload(CameraNodeLink.from_camera),
+            selectinload(CameraNodeLink.to_camera)
+        ).where(
+            CameraNodeLink.tenant_id == tenant_id,
+            CameraNodeLink.is_delete == False
+        ).order_by(CameraNodeLink.created_at.desc())
+        res = await self.db.execute(stmt)
+        return list(res.scalars().all())
+
+    async def get_camera_node_links_from(self, from_camera_id: uuid.UUID) -> List[CameraNodeLink]:
+        stmt = select(CameraNodeLink).where(
+            CameraNodeLink.from_camera_id == from_camera_id,
+            CameraNodeLink.is_delete == False
+        )
+        res = await self.db.execute(stmt)
+        return list(res.scalars().all())
+
+    async def delete_camera_node_link(self, link_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
+        stmt = select(CameraNodeLink).where(
+            CameraNodeLink.id == link_id,
+            CameraNodeLink.tenant_id == tenant_id,
+            CameraNodeLink.is_delete == False
+        )
+        res = await self.db.execute(stmt)
+        link = res.scalars().first()
+        if not link:
+            return False
+        link.is_delete = True
+        await self.db.flush()
+        return True
 
     async def create_camera_zone(
         self,
@@ -231,32 +290,57 @@ class AdvancedPeopleAnalyticsRepository:
         tenant_id: uuid.UUID,
         person_type: str,
         person_id: uuid.UUID,
-        target_date: datetime.date
+        target_date: Optional[datetime.date] = None
     ) -> List[PersonTimelineEvent]:
-        start_dt = datetime.datetime.combine(target_date, datetime.time.min, tzinfo=datetime.timezone.utc)
-        end_dt = datetime.datetime.combine(target_date, datetime.time.max, tzinfo=datetime.timezone.utc)
-
         if person_type == "employee":
             stmt = select(PersonTimelineEvent).where(
                 PersonTimelineEvent.tenant_id == tenant_id,
                 PersonTimelineEvent.person_type == "employee",
                 PersonTimelineEvent.employee_id == person_id,
-                PersonTimelineEvent.started_at >= start_dt,
-                PersonTimelineEvent.started_at <= end_dt,
                 PersonTimelineEvent.is_delete == False
-            ).order_by(PersonTimelineEvent.started_at.asc())
+            )
+            if target_date:
+                start_dt = datetime.datetime.combine(target_date, datetime.time.min, tzinfo=datetime.timezone.utc)
+                end_dt = datetime.datetime.combine(target_date, datetime.time.max, tzinfo=datetime.timezone.utc)
+                stmt = stmt.where(
+                    PersonTimelineEvent.started_at >= start_dt,
+                    PersonTimelineEvent.started_at <= end_dt
+                )
+            stmt = stmt.order_by(PersonTimelineEvent.started_at.asc())
+            res = await self.db.execute(stmt)
+            return list(res.scalars().all())
         else:
+            # Find all cross-camera linked identity IDs for this visitor
+            linked_ids = {person_id}
+            link_stmt = select(CrossCameraIdentityLink).where(
+                CrossCameraIdentityLink.tenant_id == tenant_id,
+                or_(
+                    CrossCameraIdentityLink.from_identity_id == person_id,
+                    CrossCameraIdentityLink.to_identity_id == person_id
+                ),
+                CrossCameraIdentityLink.is_delete == False
+            )
+            link_res = await self.db.execute(link_stmt)
+            for lk in link_res.scalars().all():
+                linked_ids.add(lk.from_identity_id)
+                linked_ids.add(lk.to_identity_id)
+
             stmt = select(PersonTimelineEvent).where(
                 PersonTimelineEvent.tenant_id == tenant_id,
                 PersonTimelineEvent.person_type == "visitor",
-                PersonTimelineEvent.identity_id == person_id,
-                PersonTimelineEvent.started_at >= start_dt,
-                PersonTimelineEvent.started_at <= end_dt,
+                PersonTimelineEvent.identity_id.in_(list(linked_ids)),
                 PersonTimelineEvent.is_delete == False
-            ).order_by(PersonTimelineEvent.started_at.asc())
-
-        res = await self.db.execute(stmt)
-        return list(res.scalars().all())
+            )
+            if target_date:
+                start_dt = datetime.datetime.combine(target_date, datetime.time.min, tzinfo=datetime.timezone.utc)
+                end_dt = datetime.datetime.combine(target_date, datetime.time.max, tzinfo=datetime.timezone.utc)
+                stmt = stmt.where(
+                    PersonTimelineEvent.started_at >= start_dt,
+                    PersonTimelineEvent.started_at <= end_dt
+                )
+            stmt = stmt.order_by(PersonTimelineEvent.started_at.asc())
+            res = await self.db.execute(stmt)
+            return list(res.scalars().all())
 
     # ==========================================
     # SESSION MANAGEMENT
@@ -372,8 +456,40 @@ class AdvancedPeopleAnalyticsRepository:
         if not session:
             return False
         session.is_delete = True
+        await self.db.execute(
+            delete(PersonTimelineEvent).where(
+                PersonTimelineEvent.session_id == session_id,
+                PersonTimelineEvent.tenant_id == tenant_id
+            )
+        )
         await self.db.flush()
         return True
+
+    async def get_or_create_employee_identity(
+        self,
+        tenant_id: uuid.UUID,
+        employee_id: uuid.UUID,
+        employee_name: Optional[str] = None
+    ) -> AdvancedPersonIdentity:
+        stmt = select(AdvancedPersonIdentity).where(
+            AdvancedPersonIdentity.tenant_id == tenant_id,
+            AdvancedPersonIdentity.is_employee == True,
+            AdvancedPersonIdentity.employee_id == employee_id,
+            AdvancedPersonIdentity.is_delete == False
+        )
+        res = await self.db.execute(stmt)
+        ident = res.scalars().first()
+        if not ident:
+            ident = AdvancedPersonIdentity(
+                tenant_id=tenant_id,
+                class_id=0,
+                is_employee=True,
+                employee_id=employee_id,
+                visitor_name=employee_name
+            )
+            self.db.add(ident)
+            await self.db.flush()
+        return ident
 
     # ==========================================
     # VISITOR & RE-ID EMBEDDINGS
@@ -417,6 +533,19 @@ class AdvancedPeopleAnalyticsRepository:
         if sim >= threshold:
             return identity, sim
         return None
+
+    async def get_identity_by_id(self, identity_id: uuid.UUID, tenant_id: uuid.UUID) -> Optional[AdvancedPersonIdentity]:
+        stmt = (
+            select(AdvancedPersonIdentity)
+            .options(selectinload(AdvancedPersonIdentity.embeddings))
+            .where(
+                AdvancedPersonIdentity.id == identity_id,
+                AdvancedPersonIdentity.tenant_id == tenant_id,
+                AdvancedPersonIdentity.is_delete == False
+            )
+        )
+        res = await self.db.execute(stmt)
+        return res.scalars().first()
 
     async def create_person_identity(self, tenant_id: uuid.UUID, class_id: int = 0) -> AdvancedPersonIdentity:
         identity = AdvancedPersonIdentity(tenant_id=tenant_id, class_id=class_id)
@@ -554,3 +683,174 @@ class AdvancedPeopleAnalyticsRepository:
         self.db.add(log)
         await self.db.flush()
         return log
+
+    async def get_session_detected_people(
+        self,
+        session_id: uuid.UUID,
+        tenant_id: uuid.UUID
+    ) -> List[dict]:
+        import os
+        # Query PersonTimelineEvent records for this session
+        stmt = select(PersonTimelineEvent).where(
+            PersonTimelineEvent.session_id == session_id,
+            PersonTimelineEvent.tenant_id == tenant_id,
+            PersonTimelineEvent.is_delete == False
+        ).order_by(PersonTimelineEvent.started_at.asc())
+        res = await self.db.execute(stmt)
+        events = list(res.scalars().all())
+
+        people = []
+        seen_trackers = set()
+
+        for evt in events:
+            if evt.tracker_id in seen_trackers:
+                continue
+            seen_trackers.add(evt.tracker_id)
+
+            # Resolve person display name
+            name = "Visitor"
+            if evt.person_type == "employee" and evt.employee_id:
+                emp = await self.db.get(Employee, evt.employee_id)
+                if emp:
+                    name = f"{emp.first_name} {emp.last_name}"
+            elif evt.identity_id:
+                ident = await self.db.get(AdvancedPersonIdentity, evt.identity_id)
+                if ident and ident.visitor_name:
+                    name = ident.visitor_name
+                else:
+                    name = f"Visitor #{str(evt.identity_id)[:8]}"
+            else:
+                name = f"Visitor #{evt.tracker_id}"
+
+            crop_filename = f"advanced_{session_id}_{evt.tracker_id}.jpg"
+            crop_path_disk = os.path.join("storage", "visitor_crops", crop_filename)
+            crop_url = f"/storage/visitor_crops/{crop_filename}" if os.path.exists(crop_path_disk) else None
+
+            first_seen_sec = 0.0
+            last_seen_sec = max(1.0, (evt.ended_at - evt.started_at).total_seconds())
+
+            people.append({
+                "identity_id": evt.identity_id,
+                "employee_id": evt.employee_id,
+                "person_type": evt.person_type,
+                "name": name,
+                "tracker_id": evt.tracker_id,
+                "crop_url": crop_url,
+                "first_seen": first_seen_sec,
+                "last_seen": last_seen_sec,
+                "started_at": evt.started_at,
+                "ended_at": evt.ended_at,
+                "confidence": evt.identity_confidence,
+                "identity_source": evt.identity_source,
+                "camera_name": evt.camera_name,
+            })
+
+        return people
+
+    async def get_tenant_people_summary(
+        self,
+        tenant_id: uuid.UUID,
+        target_date: Optional[datetime.date] = None,
+        person_type: Optional[str] = None,
+        search: Optional[str] = None
+    ) -> List[dict]:
+        import os
+        from collections import defaultdict
+
+        stmt = select(PersonTimelineEvent).where(
+            PersonTimelineEvent.tenant_id == tenant_id,
+            PersonTimelineEvent.is_delete == False
+        )
+        if target_date:
+            start_dt = datetime.datetime.combine(target_date, datetime.time.min, tzinfo=datetime.timezone.utc)
+            end_dt = datetime.datetime.combine(target_date, datetime.time.max, tzinfo=datetime.timezone.utc)
+            stmt = stmt.where(
+                PersonTimelineEvent.started_at >= start_dt,
+                PersonTimelineEvent.started_at <= end_dt
+            )
+        if person_type:
+            stmt = stmt.where(PersonTimelineEvent.person_type == person_type)
+
+        stmt = stmt.order_by(PersonTimelineEvent.started_at.asc())
+        res = await self.db.execute(stmt)
+        events = list(res.scalars().all())
+
+        # Group events by (person_type, person_id)
+        grouped = defaultdict(list)
+        for evt in events:
+            p_id = evt.employee_id if evt.person_type == "employee" else evt.identity_id
+            if not p_id:
+                p_id = uuid.UUID(int=evt.tracker_id)
+            grouped[(evt.person_type, str(p_id))].append(evt)
+
+        results = []
+        for (p_type, p_id_str), p_events in grouped.items():
+            p_uuid = uuid.UUID(p_id_str)
+            total_dwell = sum(
+                max(0.0, float((e.ended_at - e.started_at).total_seconds()))
+                if getattr(e, "ended_at", None) and getattr(e, "started_at", None) else 0.0
+                for e in p_events
+            )
+            cameras_visited = []
+            seen_cams = set()
+            for e in p_events:
+                if e.camera_name and e.camera_name not in seen_cams:
+                    seen_cams.add(e.camera_name)
+                    cameras_visited.append(e.camera_name)
+
+            first_seen = p_events[0].started_at
+            last_seen = max(e.ended_at for e in p_events)
+
+            name = "Visitor"
+            emp_code = None
+            crop_url = None
+
+            if p_type == "employee":
+                emp = await self.db.get(Employee, p_uuid)
+                if emp:
+                    name = f"{emp.first_name} {emp.last_name}"
+                    emp_code = emp.employee_code
+                emp_crop = os.path.join("storage", "visitor_crops", f"emp_{p_uuid}.jpg")
+                if os.path.exists(emp_crop):
+                    crop_url = f"/storage/visitor_crops/emp_{p_uuid}.jpg"
+            else:
+                ident = await self.db.get(AdvancedPersonIdentity, p_uuid)
+                if ident and ident.visitor_name:
+                    name = ident.visitor_name
+                else:
+                    name = f"Visitor #{p_id_str[:8]}"
+                vis_crop = os.path.join("storage", "visitor_crops", f"visitor_{p_uuid}.jpg")
+                if os.path.exists(vis_crop):
+                    crop_url = f"/storage/visitor_crops/visitor_{p_uuid}.jpg"
+
+            # Fallback to session crop if specific crop not found
+            if not crop_url and p_events:
+                first_evt = p_events[0]
+                crop_fname = f"advanced_{first_evt.session_id}_{first_evt.tracker_id}.jpg"
+                if os.path.exists(os.path.join("storage", "visitor_crops", crop_fname)):
+                    crop_url = f"/storage/visitor_crops/{crop_fname}"
+
+            # Filter by search string if supplied
+            if search:
+                s_lower = search.lower().strip()
+                if s_lower not in name.lower() and (not emp_code or s_lower not in emp_code.lower()) and s_lower not in p_id_str:
+                    continue
+
+            results.append({
+                "person_type": p_type,
+                "person_id": p_uuid,
+                "name": name,
+                "employee_code": emp_code,
+                "crop_url": crop_url,
+                "total_dwell_seconds": float(total_dwell),
+                "camera_stops_count": len(cameras_visited),
+                "cameras_visited": cameras_visited,
+                "first_seen_at": first_seen,
+                "last_seen_at": last_seen,
+                "latest_event_type": p_events[-1].event_type if p_events else "presence",
+            })
+
+        # Sort by latest activity
+        results.sort(key=lambda x: x["last_seen_at"], reverse=True)
+        return results
+
