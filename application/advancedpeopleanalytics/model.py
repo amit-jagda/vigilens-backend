@@ -1,7 +1,7 @@
 import uuid
 from typing import Optional, List
-from datetime import datetime
-from sqlalchemy import String, Integer, Float, ForeignKey, Boolean, DateTime, text
+from datetime import datetime, date
+from sqlalchemy import String, Integer, Float, ForeignKey, Boolean, DateTime, Date, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from pgvector.sqlalchemy import Vector
@@ -144,6 +144,19 @@ class AdvancedPersonEmbedding(BaseModel):
     embedding: Mapped[list[float]] = mapped_column(Vector(512), nullable=False)
     bbox: Mapped[list[int] | None] = mapped_column(ARRAY(Integer), nullable=True)
     timestamp: Mapped[float | None] = mapped_column(Float, nullable=True)
+    embedding_type: Mapped[str] = mapped_column(
+        String(20), default="appearance", server_default="appearance"
+    )  # "face" | "appearance"
+
+    # NEW — segmentation metadata
+    is_segmented: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )  # True = extracted from masked crop, False = plain bbox crop
+    mask_coverage: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )  # fraction of bbox pixels that are person pixels (0.0–1.0)
+    recorded_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    face_anchored: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
     identity: Mapped["AdvancedPersonIdentity"] = relationship(back_populates="embeddings")
 
@@ -332,6 +345,7 @@ class ZoneCrossingEvent(BaseModel):
     reid_embedding: Mapped[list[float] | None] = mapped_column(Vector(512), nullable=True)
     face_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    mask_coverage: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     session: Mapped["AdvancedPeopleAnalyticsSession"] = relationship(back_populates="zone_crossing_events")
     zone: Mapped["CameraZone"] = relationship()

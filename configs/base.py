@@ -16,7 +16,14 @@ class Settings(BaseSettings):
     COOKIE_SAMESITE: str = "lax"
     
     # CORS Configuration
-    BACKEND_CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8000"]
+    BACKEND_CORS_ORIGINS: list[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "http://localhost:5173",
+        "http://localhost:8000",
+    ]
     
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod
@@ -56,6 +63,7 @@ class Settings(BaseSettings):
 
     # YOLO Configuration
     YOLO_MODEL: str = "models/yolo26n.pt"
+    YOLO_SEG_MODEL: str = "yolov8l-seg.pt"
     YOLO_IMGSZ: int = 384
 
     # Advanced People Analytics Configuration

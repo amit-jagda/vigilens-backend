@@ -19,6 +19,7 @@ from application.advancedpeopleanalytics.schema import (
     VisitorAttendanceResponse,
     RegisterVisitorRequest,
     CameraNodeCreate,
+    CameraNodeUpdate,
     CameraNodeResponse,
     CameraNodeLinkCreate,
     CameraNodeLinkResponse,
@@ -84,6 +85,50 @@ async def list_camera_nodes(
         message=f"Retrieved {len(nodes)} CameraNode(s).",
         status=status.HTTP_200_OK,
         data=[CameraNodeResponse.model_validate(n) for n in nodes]
+    )
+
+
+@router.put(
+    "/cameras/{camera_id}",
+    response_model=StandardResponse[CameraNodeResponse],
+    status_code=status.HTTP_200_OK
+)
+async def update_camera_node(
+    camera_id: uuid.UUID,
+    data: CameraNodeUpdate,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Update camera node name or location label.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    node = await service.update_camera_node(tenant_id, camera_id, data)
+    return StandardResponse(
+        message="Camera node updated successfully.",
+        status=status.HTTP_200_OK,
+        data=CameraNodeResponse.model_validate(node)
+    )
+
+
+@router.delete(
+    "/cameras/{camera_id}",
+    response_model=StandardResponse[None],
+    status_code=status.HTTP_200_OK
+)
+async def delete_camera_node(
+    camera_id: uuid.UUID,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    await service.delete_camera_node(camera_id, tenant_id)
+    return StandardResponse(
+        message="Camera node deleted successfully.",
+        status=status.HTTP_200_OK,
+        data=None
     )
 
 

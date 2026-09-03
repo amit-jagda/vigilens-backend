@@ -166,3 +166,89 @@ def orient_frame(frame: np.ndarray, rotation: int) -> np.ndarray:
     elif rotation == 270:
         return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
     return frame
+
+
+def extract_masked_crop(
+    frame: np.ndarray,
+    mask: np.ndarray | None,
+    x1: int, y1: int, x2: int, y2: int,
+    background: str = "black"   # "black" | "white" | "blur"
+) -> np.ndarray:
+    """
+    Extracts a person crop from the frame using the segmentation mask.
+    Background pixels are zeroed (black), set to white, or blurred
+    depending on the background parameter.
+
+    Falls back to plain bounding box crop if mask is None or shape mismatch.
+
+    Args:
+        frame:      Full video frame (H, W, 3) BGR
+        mask:       Full-frame boolean segmentation mask (H, W) for this person
+                    Output of detections.mask[i] from YOLO-seg
+        x1,y1,x2,y2: Bounding box coordinates (already clamped to frame bounds)
+        background: How to fill non-person pixels
+
+    Returns:
+        Masked crop (y2-y1, x2-x1, 3) BGR — safe to pass directly to
+        reid_service.extract_embedding() and face_rec_service.extract_faces()
+    """
+    body_crop = frame[y1:y2, x1:x2].copy()
+
+    if mask is None:
+        return body_crop  # graceful fallback
+
+    person_mask = mask[y1:y2, x1:x2]  # crop mask to bounding box region
+
+    if person_mask.shape[:2] != body_crop.shape[:2]:
+        return body_crop  # shape mismatch — fallback
+
+    if background == "white":
+        body_crop[~person_mask] = 255
+    elif background == "blur":
+        blurred = cv2.GaussianBlur(body_crop, (21, 21), 0)
+        body_crop[~person_mask] = blurred[~person_mask]
+    else:
+        body_crop[~person_mask] = 0  # black — default, best for ReID models
+
+    return body_crop
+
+
+def extract_head_crop_from_mask(
+    frame: np.ndarray,
+    mask: np.ndarray | None,
+    x1: int, y1: int, x2: int, y2: int,
+    head_fraction: float = 0.30
+) -> np.ndarray:
+    """
+    Extracts the head/face region from the top `head_fraction` of the
+    segmentation mask bounding box. Used for face recognition crop
+    instead of the padded full-body crop.
+
+    Falls back to padded bounding box if mask unavailable.
+    """
+    h = y2 - y1
+    w = x2 - x1
+
+    if mask is None:
+        # Fallback: top 30% of bounding box with 10% padding
+        pad_y = int(h * 0.10)
+        pad_x = int(w * 0.10)
+        fh, fw = frame.shape[:2]
+        hy1 = max(0, y1 - pad_y)
+        hy2 = min(fh, y1 + int(h * head_fraction) + pad_y)
+        hx1 = max(0, x1 - pad_x)
+        hx2 = min(fw, x2 + pad_x)
+        return frame[hy1:hy2, hx1:hx2].copy()
+
+    # Use mask: find topmost pixel rows with person pixels
+    person_mask = mask[y1:y2, x1:x2]
+    head_h = max(int(h * head_fraction), 60)  # minimum 60px head region
+
+    head_crop = frame[y1:min(y2, y1 + head_h), x1:x2].copy()
+    head_mask = person_mask[:head_crop.shape[0], :]
+
+    if head_mask.shape[:2] == head_crop.shape[:2]:
+        head_crop[~head_mask] = 0  # zero background in head region too
+
+    return head_crop
+

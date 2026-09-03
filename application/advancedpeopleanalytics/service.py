@@ -23,6 +23,7 @@ from application.advancedpeopleanalytics.schema import (
     VisitorAttendanceResponse,
     RegisterVisitorRequest,
     CameraNodeCreate,
+    CameraNodeUpdate,
     CameraNodeResponse,
     CameraNodeLinkCreate,
     CameraNodeLinkResponse,
@@ -47,17 +48,45 @@ class AdvancedPeopleAnalyticsService:
     # ==========================================
 
     async def create_camera_node(self, tenant_id: uuid.UUID, data: CameraNodeCreate) -> CameraNode:
+        effective_label = data.location_label or data.location_desc or data.label
         node = await self.repo.create_camera_node(
             tenant_id=tenant_id,
             name=data.name,
-            location_label=data.location_label
+            location_label=effective_label
         )
+        await self.db.commit()
+        await self.db.refresh(node)
+        return node
+
+    async def update_camera_node(self, tenant_id: uuid.UUID, node_id: uuid.UUID, data: CameraNodeUpdate) -> CameraNode:
+        effective_label = data.location_label or data.location_desc or data.label
+        node = await self.repo.update_camera_node(
+            node_id=node_id,
+            tenant_id=tenant_id,
+            name=data.name,
+            location_label=effective_label
+        )
+        if not node:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Camera node not found."
+            )
         await self.db.commit()
         await self.db.refresh(node)
         return node
 
     async def get_camera_nodes(self, tenant_id: uuid.UUID) -> List[CameraNode]:
         return await self.repo.get_camera_nodes(tenant_id)
+
+    async def delete_camera_node(self, node_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
+        res = await self.repo.delete_camera_node(node_id, tenant_id)
+        if not res:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Camera node not found."
+            )
+        await self.db.commit()
+        return True
 
     async def create_camera_node_link(self, tenant_id: uuid.UUID, data: CameraNodeLinkCreate) -> CameraNodeLinkResponse:
         from_node = await self.repo.get_camera_node_by_id(data.from_camera_id, tenant_id)

@@ -1,7 +1,7 @@
 import uuid
 import datetime
 from typing import List, Optional, Tuple
-from sqlalchemy import select, update, delete, func, and_, or_
+from sqlalchemy import select, update, delete, func, and_, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -65,6 +65,47 @@ class AdvancedPeopleAnalyticsRepository:
         res = await self.db.execute(stmt)
         return res.scalars().first()
 
+    async def update_camera_node(
+        self,
+        node_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        name: Optional[str] = None,
+        location_label: Optional[str] = None
+    ) -> Optional[CameraNode]:
+        node = await self.get_camera_node_by_id(node_id, tenant_id)
+        if not node:
+            return None
+        if name is not None:
+            node.name = name
+        if location_label is not None:
+            node.location_label = location_label
+        await self.db.flush()
+        return node
+
+    async def delete_camera_node(self, node_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
+        stmt = select(CameraNode).where(
+            CameraNode.id == node_id,
+            CameraNode.tenant_id == tenant_id,
+            CameraNode.is_delete == False
+        )
+        res = await self.db.execute(stmt)
+        node = res.scalars().first()
+        if not node:
+            return False
+        node.is_delete = True
+        
+        # Also mark connected camera links as deleted
+        link_stmt = update(CameraNodeLink).where(
+            or_(
+                CameraNodeLink.from_camera_id == node_id,
+                CameraNodeLink.to_camera_id == node_id
+            ),
+            CameraNodeLink.tenant_id == tenant_id
+        ).values(is_delete=True)
+        await self.db.execute(link_stmt)
+        await self.db.flush()
+        return True
+
     # ==========================================
     # CAMERA-TO-CAMERA TOPOLOGY LINKS
     # ==========================================
@@ -120,6 +161,18 @@ class AdvancedPeopleAnalyticsRepository:
         if not link:
             return False
         link.is_delete = True
+
+        # Also soft-delete reverse / reciprocal link between the same pair of cameras if it exists
+        stmt_reverse = select(CameraNodeLink).where(
+            CameraNodeLink.from_camera_id == link.to_camera_id,
+            CameraNodeLink.to_camera_id == link.from_camera_id,
+            CameraNodeLink.tenant_id == tenant_id,
+            CameraNodeLink.is_delete == False
+        )
+        res_reverse = await self.db.execute(stmt_reverse)
+        for rev in res_reverse.scalars().all():
+            rev.is_delete = True
+
         await self.db.flush()
         return True
 
@@ -188,7 +241,8 @@ class AdvancedPeopleAnalyticsRepository:
         identity_id: Optional[uuid.UUID] = None,
         reid_embedding: Optional[list[float]] = None,
         face_confirmed: bool = False,
-        confidence: float = 1.0
+        confidence: float = 1.0,
+        mask_coverage: Optional[float] = None
     ) -> ZoneCrossingEvent:
         evt = ZoneCrossingEvent(
             tenant_id=tenant_id,
@@ -200,7 +254,8 @@ class AdvancedPeopleAnalyticsRepository:
             real_world_time=real_world_time,
             reid_embedding=reid_embedding,
             face_confirmed=face_confirmed,
-            confidence=confidence
+            confidence=confidence,
+            mask_coverage=mask_coverage
         )
         self.db.add(evt)
         await self.db.flush()
@@ -498,40 +553,46 @@ class AdvancedPeopleAnalyticsRepository:
     async def find_similar_visitor(
         self,
         tenant_id: uuid.UUID,
-        embedding: List[float],
+        target_embedding: list[float],
         threshold: float,
-        class_id: int = 0
+        class_id: int = 0,
+        embedding_type: str = "appearance",
+        prefer_segmented: bool = True
     ) -> Optional[Tuple[AdvancedPersonIdentity, float]]:
+
+        distance_limit = 1.0 - threshold
+
         stmt = (
-            select(AdvancedPersonEmbedding, AdvancedPersonIdentity)
-            .join(AdvancedPersonIdentity, AdvancedPersonEmbedding.identity_id == AdvancedPersonIdentity.id)
+            select(
+                AdvancedPersonIdentity,
+                AdvancedPersonEmbedding.embedding.cosine_distance(target_embedding).label("distance"),
+                AdvancedPersonEmbedding.is_segmented,
+                AdvancedPersonEmbedding.mask_coverage
+            )
+            .join(AdvancedPersonEmbedding, AdvancedPersonEmbedding.identity_id == AdvancedPersonIdentity.id)
             .where(
                 AdvancedPersonIdentity.tenant_id == tenant_id,
                 AdvancedPersonIdentity.class_id == class_id,
                 AdvancedPersonIdentity.is_delete == False,
-                AdvancedPersonEmbedding.is_delete == False
+                AdvancedPersonEmbedding.is_delete == False,
+                AdvancedPersonEmbedding.is_active == True,
+                AdvancedPersonEmbedding.embedding_type == embedding_type,
+                AdvancedPersonEmbedding.embedding.cosine_distance(target_embedding) <= distance_limit
             )
-            .order_by(AdvancedPersonEmbedding.embedding.cosine_distance(embedding))
+            .order_by(
+                AdvancedPersonEmbedding.is_segmented.desc() if prefer_segmented else text("1"),
+                AdvancedPersonEmbedding.mask_coverage.desc().nulls_last(),
+                text("distance ASC")
+            )
             .limit(1)
         )
-        res = await self.db.execute(stmt)
-        row = res.first()
-        if not row:
-            return None
 
-        emb_obj, identity = row
-        import numpy as np
-        vec1 = np.array(embedding, dtype=np.float32)
-        vec2 = np.array(emb_obj.embedding, dtype=np.float32)
-        
-        n1 = np.linalg.norm(vec1)
-        n2 = np.linalg.norm(vec2)
-        if n1 == 0 or n2 == 0:
-            return None
-        sim = float(np.dot(vec1, vec2) / (n1 * n2))
-
-        if sim >= threshold:
-            return identity, sim
+        result = await self.db.execute(stmt)
+        row = result.first()
+        if row:
+            identity, distance, is_seg, coverage = row
+            similarity = 1.0 - distance
+            return identity, similarity
         return None
 
     async def get_identity_by_id(self, identity_id: uuid.UUID, tenant_id: uuid.UUID) -> Optional[AdvancedPersonIdentity]:
@@ -558,17 +619,54 @@ class AdvancedPeopleAnalyticsRepository:
         identity_id: uuid.UUID,
         embedding: List[float],
         bbox: Optional[List[int]] = None,
-        timestamp: Optional[float] = None
+        timestamp: Optional[float] = None,
+        embedding_type: str = "appearance",
+        is_segmented: bool = False,
+        mask_coverage: Optional[float] = None,
+        recorded_date: Optional[datetime.date] = None,
+        is_active: bool = True,
+        face_anchored: bool = False
     ) -> AdvancedPersonEmbedding:
         emb = AdvancedPersonEmbedding(
             identity_id=identity_id,
             embedding=embedding,
             bbox=bbox,
-            timestamp=timestamp
+            timestamp=timestamp,
+            embedding_type=embedding_type,
+            is_segmented=is_segmented,
+            mask_coverage=mask_coverage,
+            recorded_date=recorded_date,
+            is_active=is_active,
+            face_anchored=face_anchored
         )
         self.db.add(emb)
         await self.db.flush()
         return emb
+
+    async def deactivate_old_appearance_embeddings(
+        self,
+        identity_id: uuid.UUID,
+        current_date: datetime.date
+    ) -> int:
+        """
+        Deactivates older appearance embeddings (recorded_date < current_date or recorded_date is None)
+        for a given identity when fresh face-confirmed appearance embeddings are recorded today.
+        """
+        stmt = (
+            update(AdvancedPersonEmbedding)
+            .where(
+                AdvancedPersonEmbedding.identity_id == identity_id,
+                AdvancedPersonEmbedding.embedding_type == "appearance",
+                AdvancedPersonEmbedding.is_active == True,
+                or_(
+                    AdvancedPersonEmbedding.recorded_date < current_date,
+                    AdvancedPersonEmbedding.recorded_date.is_(None)
+                )
+            )
+            .values(is_active=False)
+        )
+        res = await self.db.execute(stmt)
+        return res.rowcount
 
     async def create_person_occurrence(
         self,
@@ -664,6 +762,8 @@ class AdvancedPeopleAnalyticsRepository:
         self.db.add(log)
         await self.db.flush()
         return log
+
+    create_employee_attendance_log = create_employee_attendance
 
     async def create_line_crossing_log(
         self,

@@ -10,6 +10,15 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 class CameraNodeCreate(BaseModel):
     name: str = Field(..., example="Reception")
     location_label: Optional[str] = Field(None, example="Main Entrance Floor 1")
+    location_desc: Optional[str] = None
+    label: Optional[str] = None
+
+
+class CameraNodeUpdate(BaseModel):
+    name: Optional[str] = None
+    location_label: Optional[str] = None
+    location_desc: Optional[str] = None
+    label: Optional[str] = None
 
 
 class CameraNodeResponse(BaseModel):
@@ -115,7 +124,7 @@ class TimelineEventResponse(BaseModel):
 class PersonTimelineResponse(BaseModel):
     person_id: uuid.UUID
     person_type: str
-    date: datetime.date
+    date: Optional[datetime.date] = None
     events: List[TimelineEventResponse] = Field(default_factory=list)
 
 
