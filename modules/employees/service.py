@@ -49,6 +49,45 @@ class EmployeeService:
             embedding=embedding.tolist(),
             bbox=bbox
         )
+
+        # Extract and anchor full-body clothing ReID appearance embedding from uploaded photo
+        try:
+            from application.utils.reid import reid_service
+            from application.advancedpeopleanalytics.repository import AdvancedPeopleAnalyticsRepository
+            from datetime import datetime, timezone
+            
+            img_arr = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_COLOR)
+            if img_arr is not None and img_arr.size > 0:
+                h_img, w_img = img_arr.shape[:2]
+                body_crop = img_arr
+                if bbox and len(bbox) == 4:
+                    fx1, fy1, fx2, fy2 = map(int, bbox)
+                    if (h_img - fy1) > (fy2 - fy1) * 1.5:
+                        body_crop = img_arr[max(0, fy1):h_img, 0:w_img]
+
+                reid_vec = reid_service.extract_embedding(body_crop)
+                if reid_vec is not None:
+                    apa_repo = AdvancedPeopleAnalyticsRepository(self.db)
+                    emp_ident = await apa_repo.get_or_create_employee_identity(
+                        tenant_id=tenant_id,
+                        employee_id=employee.id,
+                        employee_name=f"{first_name} {last_name}"
+                    )
+                    today_date = datetime.now(timezone.utc).date()
+                    await apa_repo.create_person_embedding(
+                        identity_id=emp_ident.id,
+                        embedding=reid_vec.tolist(),
+                        bbox=[0, 0, w_img, h_img],
+                        timestamp=0.0,
+                        embedding_type="appearance",
+                        is_segmented=False,
+                        recorded_date=today_date,
+                        is_active=True,
+                        face_anchored=True
+                    )
+        except Exception as reid_err:
+            print(f"Warning: Failed to anchor employee appearance embedding in Advanced Analytics: {reid_err}")
+
         await self.db.commit()
         await invalidate_employee_embeddings_cache(tenant_id)
         return employee
@@ -127,6 +166,44 @@ class EmployeeService:
                 embedding=embedding.tolist(),
                 bbox=bbox
             )
+
+            # Update clothing ReID appearance embedding
+            try:
+                from application.utils.reid import reid_service
+                from application.advancedpeopleanalytics.repository import AdvancedPeopleAnalyticsRepository
+                from datetime import datetime, timezone
+
+                img_arr = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_COLOR)
+                if img_arr is not None and img_arr.size > 0:
+                    h_img, w_img = img_arr.shape[:2]
+                    body_crop = img_arr
+                    if bbox and len(bbox) == 4:
+                        fx1, fy1, fx2, fy2 = map(int, bbox)
+                        if (h_img - fy1) > (fy2 - fy1) * 1.5:
+                            body_crop = img_arr[max(0, fy1):h_img, 0:w_img]
+
+                    reid_vec = reid_service.extract_embedding(body_crop)
+                    if reid_vec is not None:
+                        apa_repo = AdvancedPeopleAnalyticsRepository(self.db)
+                        emp_ident = await apa_repo.get_or_create_employee_identity(
+                            tenant_id=tenant_id,
+                            employee_id=employee.id,
+                            employee_name=f"{employee.first_name} {employee.last_name}"
+                        )
+                        today_date = datetime.now(timezone.utc).date()
+                        await apa_repo.create_person_embedding(
+                            identity_id=emp_ident.id,
+                            embedding=reid_vec.tolist(),
+                            bbox=[0, 0, w_img, h_img],
+                            timestamp=0.0,
+                            embedding_type="appearance",
+                            is_segmented=False,
+                            recorded_date=today_date,
+                            is_active=True,
+                            face_anchored=True
+                        )
+            except Exception as reid_err:
+                print(f"Warning: Failed to anchor employee appearance embedding in Advanced Analytics: {reid_err}")
             
         await self.db.commit()
         await invalidate_employee_embeddings_cache(tenant_id)

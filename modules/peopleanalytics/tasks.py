@@ -438,33 +438,48 @@ async def _process_video_job(
     else:
         out_w, out_h = orig_width, orig_height
 
+    # --- CONFIGURABLE ANALYSIS MODE: Full-Frame vs Smart 5 FPS Sampling ---
+    env_full_frame = os.getenv("PROCESS_EVERY_FRAME", str(getattr(settings, "PROCESS_EVERY_FRAME", False))).lower() in ("true", "1", "yes")
+    if env_full_frame:
+        TARGET_FPS = fps
+        frame_interval = 1
+        processing_fps = fps
+    else:
+        TARGET_FPS = float(os.getenv("PROCESSING_FPS", getattr(settings, "PROCESSING_FPS", 5.0)))
+        frame_interval = max(1, int(round(fps / TARGET_FPS)))
+        processing_fps = fps / frame_interval
+
+    MAX_OUT_W, MAX_OUT_H = 1280, 720
+    scale_factor = min(1.0, MAX_OUT_W / out_w, MAX_OUT_H / out_h)
+    vid_w = int(out_w * scale_factor)
+    vid_h = int(out_h * scale_factor)
+    vid_w = vid_w if vid_w % 2 == 0 else vid_w - 1
+    vid_h = vid_h if vid_h % 2 == 0 else vid_h - 1
+
     # Initialize video writer
     output_filename = f"{uuid.uuid4()}_annotated.mp4"
     user_outputs_dir = os.path.join(ANALYTICS_OUTPUTS_DIR, user_id_str) if user_id_str else ANALYTICS_OUTPUTS_DIR
     os.makedirs(user_outputs_dir, exist_ok=True)
     output_path = os.path.join(user_outputs_dir, output_filename)
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    output_writer = cv2.VideoWriter(output_path, fourcc, fps, (out_w, out_h))
+    output_writer = cv2.VideoWriter(output_path, fourcc, processing_fps, (vid_w, vid_h))
 
     # Initialize tracker and line crossing
     tracker = sv.ByteTrack(
-        frame_rate=int(fps),
-        lost_track_buffer=int(fps * 10)  # Keep lost tracks in memory for up to 10 seconds (aligns with employee module)
+        frame_rate=int(processing_fps),
+        lost_track_buffer=int(processing_fps * 8)
     )
     line_counter = None
     if line_crossing_analysis and line_start and line_end and len(line_start) == 2 and len(line_end) == 2 and line_start != line_end:
         line_counter = LineCrossingCounter(line_start, line_end)
 
     # Tracking states
-    # tracker_id -> {"type": "employee"|"visitor", "id": UUID, "first_seen": float, "last_seen": float, "occurrences": int, "label": str, "color": tuple}
     active_tracks = {}
-    
-    # Store complete session records for bulk inserts at the end
-    completed_occurrences = []  # List of dicts
-    completed_attendance = []   # List of dicts
-    completed_visitor_attendance = [] # List of dicts
-    completed_crossings = []    # List of dicts
-    track_crossings = []        # Temp list of all raw crossing events
+    completed_occurrences = []
+    completed_attendance = []
+    completed_visitor_attendance = []
+    completed_crossings = []
+    track_crossings = []
 
     occupancy_history = []
     unique_seen_identities = set()
@@ -473,21 +488,54 @@ async def _process_video_job(
     exit_count = None
     peak_occupancy_so_far = 0
 
-    frame_step = max(1, int(fps / 5))  # Process face recognition 5 times per second
-    frame_idx = 0
+    frame_step = max(1, int(processing_fps / 2))  # Process face recognition twice per second
+    raw_frame_idx = 0
+    processed_frame_idx = 0
     
     while cap.isOpened():
-        ret, frame = cap.read()
+        grabbed = cap.grab()
+        if not grabbed:
+            break
+        raw_frame_idx += 1
+
+        if raw_frame_idx % frame_interval != 0:
+            continue
+
+        ret, frame = cap.retrieve()
         if not ret or frame is None:
             break
+
+        processed_frame_idx += 1
 
         if video_rotation != 0:
             frame = _orient_frame(frame, video_rotation)
 
-        if frame_idx % 10 == 0:
-            progress = int((frame_idx / total_frames) * 100) if total_frames > 0 else 0
-            frames_left = total_frames - frame_idx
-            logger.info(f"Session {session.id} - Processing frame {frame_idx}/{total_frames} ({progress}% completed, {frames_left} frames left)...")
+        timestamp_sec = raw_frame_idx / fps
+
+        # Check for user cancellation every 10 processed frames
+        if processed_frame_idx % 10 == 0:
+            try:
+                from database.redis import get_redis_client
+                r_client = get_redis_client()
+                if r_client:
+                    is_cancelled = await r_client.get(f"peopleanalytics:cancelled:{session.id}")
+                    if is_cancelled:
+                        logger.info(f"🛑 Session {session.id} was deleted by user. Aborting background analysis immediately.")
+                        cap.release()
+                        output_writer.release()
+                        if os.path.exists(output_path):
+                            try:
+                                os.remove(output_path)
+                            except Exception:
+                                pass
+                        return
+            except Exception:
+                pass
+
+        if raw_frame_idx % (frame_interval * 5) == 0:
+            progress = int((raw_frame_idx / total_frames) * 100) if total_frames > 0 else 0
+            frames_left = total_frames - raw_frame_idx
+            logger.info(f"Session {session.id} - Processing frame {raw_frame_idx}/{total_frames} ({progress}% completed, {frames_left} frames left)...")
             
             # Save progress to Redis
             try:
@@ -501,11 +549,8 @@ async def _process_video_job(
             except Exception as re_err:
                 logger.error(f"Failed to update progress in Redis: {re_err}")
 
-        timestamp_sec = frame_idx / fps
-        frame_idx += 1
-
-        # Run inference (Person Class only = class 0)
-        results = model(frame, conf=float(confidence_threshold), classes=[0], verbose=False)
+        # Run accelerated inference (imgsz=640)
+        results = model(frame, imgsz=640, conf=float(confidence_threshold), classes=[0], verbose=False)
         detections = sv.Detections.from_ultralytics(results[0])
         detections = tracker.update_with_detections(detections)
 
@@ -742,7 +787,8 @@ async def _process_video_job(
         if line_counter and line_start and line_end and len(line_start) == 2 and len(line_end) == 2 and line_start != line_end:
             cv2.line(frame, tuple(line_start), tuple(line_end), (255, 0, 255), 2)
 
-        output_writer.write(frame)
+        out_frame = cv2.resize(frame, (vid_w, vid_h)) if scale_factor < 1.0 else frame
+        output_writer.write(out_frame)
 
     cap.release()
     output_writer.release()

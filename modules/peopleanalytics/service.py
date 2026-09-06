@@ -189,6 +189,19 @@ class PeopleAnalyticsService:
         return sessions
 
     async def delete_session(self, session_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+        # Signal immediate background task cancellation via Redis
+        try:
+            from database.redis import get_redis_client, init_redis
+            r_client = get_redis_client()
+            if r_client is None:
+                await init_redis()
+                r_client = get_redis_client()
+            if r_client:
+                await r_client.setex(f"peopleanalytics:cancelled:{session_id}", 3600, "1")
+                await r_client.delete(f"peopleanalytics:progress:{session_id}")
+        except Exception:
+            pass
+
         # Soft delete in database
         res = await self.repo.delete_session(session_id, tenant_id)
         if not res:

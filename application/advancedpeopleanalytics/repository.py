@@ -595,6 +595,42 @@ class AdvancedPeopleAnalyticsRepository:
             return identity, similarity
         return None
 
+    async def get_active_identities_with_embeddings(
+        self,
+        tenant_id: uuid.UUID,
+        class_id: int = 0,
+        target_date: Optional[datetime.date] = None
+    ) -> List[Tuple[AdvancedPersonIdentity, List[float]]]:
+        conditions = [
+            AdvancedPersonIdentity.tenant_id == tenant_id,
+            AdvancedPersonIdentity.class_id == class_id,
+            AdvancedPersonIdentity.is_delete == False,
+            AdvancedPersonEmbedding.is_delete == False,
+            AdvancedPersonEmbedding.embedding_type == "appearance"
+        ]
+
+        if target_date is not None:
+            conditions.append(
+                or_(
+                    AdvancedPersonEmbedding.recorded_date == target_date,
+                    and_(
+                        AdvancedPersonEmbedding.is_active == True,
+                        AdvancedPersonEmbedding.recorded_date.is_(None)
+                    )
+                )
+            )
+        else:
+            conditions.append(AdvancedPersonEmbedding.is_active == True)
+
+        stmt = (
+            select(AdvancedPersonIdentity, AdvancedPersonEmbedding.embedding)
+            .join(AdvancedPersonEmbedding, AdvancedPersonEmbedding.identity_id == AdvancedPersonIdentity.id)
+            .where(*conditions)
+            .order_by(AdvancedPersonEmbedding.created_at.desc())
+        )
+        result = await self.db.execute(stmt)
+        return [(row[0], list(row[1])) for row in result.all() if row[1] is not None]
+
     async def get_identity_by_id(self, identity_id: uuid.UUID, tenant_id: uuid.UUID) -> Optional[AdvancedPersonIdentity]:
         stmt = (
             select(AdvancedPersonIdentity)

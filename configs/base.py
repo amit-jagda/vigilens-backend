@@ -67,6 +67,8 @@ class Settings(BaseSettings):
     YOLO_IMGSZ: int = 384
 
     # Advanced People Analytics Configuration
+    PROCESS_EVERY_FRAME: bool = False  # Set to True to analyze 100% of video frames (native FPS) without skipping
+    PROCESSING_FPS: float = 5.0  # Analyzed frames per second when PROCESS_EVERY_FRAME is False
     ADVANCED_FACE_SIMILARITY_THRESHOLD: float = 0.45
     ADVANCED_REID_SIMILARITY_THRESHOLD: float = 0.80
     ADVANCED_FACE_MIN_SIZE: int = 35

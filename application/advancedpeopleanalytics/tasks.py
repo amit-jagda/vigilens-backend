@@ -209,14 +209,35 @@ async def _process_video_job(
     video_rotation = get_video_rotation(filepath)
     out_w, out_h = (orig_height, orig_width) if video_rotation in (90, 270) else (orig_width, orig_height)
 
+    # --- CONFIGURABLE ANALYSIS MODE: Full-Frame vs Smart 5 FPS Sampling ---
+    env_full_frame = os.getenv("PROCESS_EVERY_FRAME", str(getattr(settings, "PROCESS_EVERY_FRAME", False))).lower() in ("true", "1", "yes")
+    if env_full_frame:
+        TARGET_FPS = fps
+        frame_interval = 1
+        processing_fps = fps
+        logger.info(f"🚀 [Session {session.id}] FULL-FRAME MODE ACTIVE: Analyzing 100% of frames ({fps:.1f} FPS, frame_interval=1)")
+    else:
+        TARGET_FPS = float(os.getenv("PROCESSING_FPS", os.getenv("ADVANCED_PROCESSING_FPS", getattr(settings, "PROCESSING_FPS", 5.0))))
+        frame_interval = max(1, int(round(fps / TARGET_FPS)))
+        processing_fps = fps / frame_interval
+        logger.info(f"⚡ [Session {session.id}] SMART SAMPLING ACTIVE: Target {TARGET_FPS} FPS (processing 1 out of every {frame_interval} frames)")
+
+    # Output video max 720p resolution for ultra-fast software encoding
+    MAX_OUT_W, MAX_OUT_H = 1280, 720
+    scale_factor = min(1.0, MAX_OUT_W / out_w, MAX_OUT_H / out_h)
+    vid_w = int(out_w * scale_factor)
+    vid_h = int(out_h * scale_factor)
+    vid_w = vid_w if vid_w % 2 == 0 else vid_w - 1
+    vid_h = vid_h if vid_h % 2 == 0 else vid_h - 1
+
     output_filename = f"{uuid.uuid4()}_annotated.mp4"
     user_outputs_dir = os.path.join(ADVANCED_OUTPUTS_DIR, user_id_str) if user_id_str else ADVANCED_OUTPUTS_DIR
     os.makedirs(user_outputs_dir, exist_ok=True)
     output_path = os.path.join(user_outputs_dir, output_filename)
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    output_writer = cv2.VideoWriter(output_path, fourcc, fps, (out_w, out_h))
+    output_writer = cv2.VideoWriter(output_path, fourcc, processing_fps, (vid_w, vid_h))
 
-    tracker = sv.ByteTrack(frame_rate=int(fps), lost_track_buffer=int(fps * 10))
+    tracker = sv.ByteTrack(frame_rate=int(processing_fps), lost_track_buffer=int(processing_fps * 8))
     line_counter = None
     if line_crossing_analysis and line_start and line_end and len(line_start) == 2 and len(line_end) == 2 and line_start != line_end:
         line_counter = LineCrossingCounter(line_start, line_end)
@@ -231,101 +252,112 @@ async def _process_video_job(
         base_time = session.recording_started_at or datetime.now(timezone.utc)
         return base_time + timedelta(seconds=video_sec)
 
+    video_date = (
+        session.recording_started_at.date()
+        if session.recording_started_at is not None
+        else datetime.now(timezone.utc).date()
+    )
+
     employee_dict = {str(emp.id): emp for emp, emb in (employee_cache or []) if hasattr(emp, "id")}
     active_tracks = {}
     occupancy_history = []
     peak_occupancy_so_far = 0
-    frame_step = max(1, int(fps / 5))
-    frame_idx = 0
 
-    # --- PERFORMANCE OPTIMIZATION: Adaptive Motion Gating & Dynamic Stride ---
-    prev_gray_thumb = None
-    MOTION_PIXEL_THRESH = 22       # Grayscale pixel change threshold
-    MIN_MOTION_AREA = 90           # Minimum changed pixels in 160x90 thumb (~0.6% area)
-    STATIC_STRIDE = max(1, int(fps / 3))     # Sample @ ~3 FPS when empty/static
-    ACTIVE_STRIDE = max(1, int(fps / 15))    # Sample @ ~15 FPS when person/motion present
-    last_detections = None
+    # Pre-cache active identities and their ReID embeddings for this video's specific date in memory (0ms lookup)
+    db_identities = await repo.get_active_identities_with_embeddings(session.tenant_id, class_id=0, target_date=video_date)
+    session_reid_cache = []
+    for ident, emb_raw in db_identities:
+        if emb_raw and len(emb_raw) > 0:
+            arr = np.array(emb_raw, dtype=np.float32)
+            n = np.linalg.norm(arr)
+            if n > 0:
+                session_reid_cache.append((ident, arr / n))
+
+    raw_frame_idx = 0
+    processed_frame_idx = 0
+
+    # High-contrast Terminal ANSI Color Codes
+    CLR_RST = "\033[0m"
+    CLR_YG = "\033[1;38;5;154m"      # Vibrant Yellow-Green (Bold)
+    CLR_YEL = "\033[1;33m"           # Bold Yellow
+    CLR_GRN = "\033[1;32m"           # Bold Emerald Green
+    CLR_CYAN = "\033[1;36m"          # Bold Cyan
+    CLR_DIM = "\033[38;5;245m"       # Muted / Dim Gray
 
     while cap.isOpened():
-        ret, frame = cap.read()
+        # Clean & fast packet grabbing
+        grabbed = cap.grab()
+        if not grabbed:
+            break
+        raw_frame_idx += 1
+
+        # Only decode the actual pixel image for target FPS intervals
+        if raw_frame_idx % frame_interval != 0:
+            continue
+
+        ret, frame = cap.retrieve()
         if not ret or frame is None:
             break
+
+        processed_frame_idx += 1
 
         if video_rotation != 0:
             frame = orient_frame(frame, video_rotation)
 
-        if frame_idx % 10 == 0:
-            progress = int((frame_idx / total_frames) * 100) if total_frames > 0 else 0
+        timestamp_sec = raw_frame_idx / fps
+        real_time_now = to_real_time(timestamp_sec)
+
+        # Check for user cancellation every 10 processed frames
+        if processed_frame_idx % 10 == 0:
             try:
                 from database.redis import get_redis_client
                 r_client = get_redis_client()
                 if r_client:
-                    await r_client.setex(f"advancedpeopleanalytics:progress:{session.id}", 3600, str(progress))
+                    is_cancelled = await r_client.get(f"advancedpeopleanalytics:cancelled:{session.id}")
+                    if is_cancelled:
+                        logger.info(f"🛑 Session {session.id} was deleted by user. Aborting background analysis immediately.")
+                        cap.release()
+                        output_writer.release()
+                        if os.path.exists(output_path):
+                            try:
+                                os.remove(output_path)
+                            except Exception:
+                                pass
+                        return
             except Exception:
                 pass
 
-        timestamp_sec = frame_idx / fps
-        real_time_now = to_real_time(timestamp_sec)
-        frame_idx += 1
+        # Smooth progress reporting (1% to 99%)
+        progress = max(1, min(99, int((raw_frame_idx / total_frames) * 100))) if total_frames > 0 else 1
+        try:
+            from database.redis import get_redis_client
+            r_client = get_redis_client()
+            if r_client:
+                await r_client.setex(f"advancedpeopleanalytics:progress:{session.id}", 3600, str(progress))
+        except Exception:
+            pass
 
-        # 1. Fast Motion Differencing Check on a tiny 160x90 thumbnail (< 0.15ms)
-        thumb = cv2.resize(frame, (160, 90), interpolation=cv2.INTER_NEAREST)
-        gray_thumb = cv2.cvtColor(thumb, cv2.COLOR_BGR2GRAY)
-        gray_thumb = cv2.GaussianBlur(gray_thumb, (5, 5), 0)
-
-        has_motion = True
-        if prev_gray_thumb is not None:
-            frame_delta = cv2.absdiff(prev_gray_thumb, gray_thumb)
-            thresh_delta = cv2.threshold(frame_delta, MOTION_PIXEL_THRESH, 255, cv2.THRESH_BINARY)[1]
-            motion_pixels = cv2.countNonZero(thresh_delta)
-            has_motion = motion_pixels >= MIN_MOTION_AREA
-        prev_gray_thumb = gray_thumb
-
-        # 2. Check if we recently had active tracks in the camera scene (< 1.5s ago)
-        has_active_recent_tracks = bool(
-            active_tracks and any((timestamp_sec - t.get("last_seen", 0)) < 1.5 for t in active_tracks.values())
-        )
-
-        current_stride = ACTIVE_STRIDE if (has_motion or has_active_recent_tracks) else STATIC_STRIDE
-        should_run_yolo = (frame_idx % current_stride == 0) or (has_motion and not has_active_recent_tracks)
-
-        # 3. FAST PATH: Empty & Static scene -> Bypass heavy neural network completely!
-        if not should_run_yolo and not has_active_recent_tracks:
-            occupancy_history.append({"time_sec": round(timestamp_sec, 2), "occupancy": 0})
-            
-            # Draw Gate Line & HUD on output video without running YOLO
-            if line_counter:
-                p1 = (int(line_counter.start_point[0]), int(line_counter.start_point[1]))
-                p2 = (int(line_counter.end_point[0]), int(line_counter.end_point[1]))
-                cv2.line(frame, p1, p2, (255, 255, 0), 3)
-                cv2.circle(frame, p1, 6, (0, 255, 0), -1)
-                cv2.circle(frame, p2, 6, (0, 0, 255), -1)
-
-            if track_occupancy or line_crossing_analysis:
-                hud_w, hud_h = 340, 100
-                if out_w > hud_w + 20 and out_h > hud_h + 20:
-                    sub = frame[10:10+hud_h, 10:10+hud_w]
-                    bg = np.zeros(sub.shape, dtype=np.uint8) + 15
-                    frame[10:10+hud_h, 10:10+hud_w] = cv2.addWeighted(sub, 0.3, bg, 0.7, 0)
-                    in_cnt = line_counter.in_count if line_counter else 0
-                    out_cnt = line_counter.out_count if line_counter else 0
-                    cv2.putText(frame, "ADVANCED PEOPLE & SPATIAL ANALYTICS", (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-                    cv2.putText(frame, f"Occupancy: 0  |  Peak: {peak_occupancy_so_far}", (20, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
-                    cv2.putText(frame, f"Gate Line  --> IN: {in_cnt}   <-- OUT: {out_cnt}", (20, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
-
-            output_writer.write(frame)
-            continue
-
-        # 4. ACTIVE PATH: Run YOLOv8 Segmentation & ByteTrack
-        results = model(frame, conf=float(confidence_threshold), classes=[0], verbose=False)
+        # Run accelerated YOLO inference on every sampled frame (imgsz=640)
+        results = model(frame, imgsz=640, conf=float(confidence_threshold), classes=[0], verbose=False)
         detections = sv.Detections.from_ultralytics(results[0])
         detections = tracker.update_with_detections(detections)
-        last_detections = detections
 
         current_occupancy = len(detections) if detections.tracker_id is not None else 0
         occupancy_history.append({"time_sec": round(timestamp_sec, 2), "occupancy": current_occupancy})
         if current_occupancy > peak_occupancy_so_far:
             peak_occupancy_so_far = current_occupancy
+
+        # Clear, informative per-frame logging
+        if current_occupancy > 0:
+            logger.info(
+                f"{CLR_YG}🔍 [Frame {raw_frame_idx}/{total_frames} | {timestamp_sec:.1f}s | {progress}%] "
+                f"PROCESSED -> People: {current_occupancy} | Active Tracks: {len(active_tracks)}{CLR_RST}"
+            )
+        elif processed_frame_idx % 10 == 0:
+            logger.info(
+                f"{CLR_DIM}⏳ [Frame {raw_frame_idx}/{total_frames} | {timestamp_sec:.1f}s | {progress}%] "
+                f"Scanning frame (0 people present){CLR_RST}"
+            )
 
         if detections.tracker_id is not None:
             for xyxy, class_id, tracker_id in zip(detections.xyxy, detections.class_id, detections.tracker_id):
@@ -335,32 +367,27 @@ async def _process_video_job(
                 x1, y1, x2, y2 = map(int, xyxy)
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(out_w, x2), min(out_h, y2)
+                bbox_height = y2 - y1
 
                 center_x = (x1 + x2) / 2.0
                 center_y = (y1 + y2) / 2.0
 
-                # Extract person segmentation mask for this tracker_id
                 person_mask = None
                 mask_coverage = None
                 if detections.mask is not None:
-                    # detections.mask shape: (N, H, W) — one boolean mask per detection
                     det_indices = np.where(detections.tracker_id == tracker_id)[0]
                     if len(det_indices) > 0:
-                        raw_mask = detections.mask[det_indices[0]]  # (H, W) boolean
-
-                        # Ensure mask matches frame dimensions
+                        raw_mask = detections.mask[det_indices[0]]
                         if raw_mask.shape == (out_h, out_w):
                             person_mask = raw_mask
                         else:
-                            # Resize mask to frame size if YOLO returns smaller mask
                             person_mask = cv2.resize(
                                 raw_mask.astype(np.uint8), (out_w, out_h),
                                 interpolation=cv2.INTER_NEAREST
                             ).astype(bool)
 
-                        # Compute mask coverage — fraction of bbox area that is person
                         bbox_mask = person_mask[y1:y2, x1:x2]
-                        bbox_area = max((y2 - y1) * (x2 - x1), 1)
+                        bbox_area = max(bbox_height * (x2 - x1), 1)
                         mask_coverage = float(np.sum(bbox_mask) / bbox_area)
 
                 if tracker_id not in active_tracks:
@@ -391,19 +418,22 @@ async def _process_video_job(
                 track_info = active_tracks[tracker_id]
                 track_info["last_seen"] = timestamp_sec
 
-                # Extract ReID & Face embedding every frame_step only if face is not yet confirmed
-                if frame_idx % frame_step == 0 and not track_info["face_confirmed"]:
+                # SMART FACE & REID EXTRACTION (Skip if face already confirmed, or if too small/distant)
+                is_close_enough_for_face = bbox_height >= 85
+                should_check_face = (
+                    not track_info["face_confirmed"] and
+                    is_close_enough_for_face and
+                    (processed_frame_idx % 3 == 0) # Sample face every ~0.6s
+                )
+                should_extract_reid = (
+                    track_info["reid_embedding"] is None and
+                    (mask_coverage is None or mask_coverage >= 0.35)
+                )
+
+                if should_extract_reid or should_check_face:
                     body_crop = extract_masked_crop(frame, person_mask, x1, y1, x2, y2, background="black")
-                    face_crop = extract_head_crop_from_mask(frame, person_mask, x1, y1, x2, y2, head_fraction=0.30)
-
-                    # Minimum quality gate on mask — skip ReID if person too occluded
-                    MINIMUM_MASK_COVERAGE = 0.25
-                    should_extract_reid = (
-                        mask_coverage is None or mask_coverage >= MINIMUM_MASK_COVERAGE
-                    )
-
+                    
                     if should_extract_reid and body_crop is not None and body_crop.size > 0:
-                        # Extract 512D ReID Embedding
                         reid_vec = reid_service.extract_embedding(body_crop)
                         if reid_vec is not None:
                             track_info["reid_embedding"] = reid_vec.tolist()
@@ -411,14 +441,16 @@ async def _process_video_job(
                             track_info["mask_coverage"] = mask_coverage
 
                     faces = []
-                    if face_crop is not None and face_crop.size > 0:
-                        _, encoded_crop = cv2.imencode(".jpg", face_crop)
-                        try:
-                            faces = face_rec_service.extract_faces(encoded_crop.tobytes())
-                        except Exception:
-                            faces = []
+                    face_crop = None
+                    if should_check_face:
+                        face_crop = extract_head_crop_from_mask(frame, person_mask, x1, y1, x2, y2, head_fraction=0.30)
+                        if face_crop is not None and face_crop.size > 0:
+                            _, encoded_crop = cv2.imencode(".jpg", face_crop)
+                            try:
+                                faces = face_rec_service.extract_faces(encoded_crop.tobytes())
+                            except Exception:
+                                faces = []
 
-                    # Configurable Face Quality Filter via env (default: 35px, 0.60 score)
                     min_face_size = int(os.getenv("ADVANCED_FACE_MIN_SIZE", getattr(settings, "ADVANCED_FACE_MIN_SIZE", 35)))
                     min_face_det_score = float(os.getenv("ADVANCED_FACE_MIN_DET_SCORE", getattr(settings, "ADVANCED_FACE_MIN_DET_SCORE", 0.60)))
 
@@ -434,24 +466,23 @@ async def _process_video_job(
                         matched_face = max(valid_faces, key=lambda f: (f["bbox"][2] - f["bbox"][0]) * (f["bbox"][3] - f["bbox"][1]))
                         face_embedding = np.array(matched_face["embedding"], dtype=np.float32)
                         try:
-                            crop_fname = f"advanced_{session.id}_{tracker_id}.jpg"
-                            cv2.imwrite(os.path.join(VISITOR_CROPS_DIR, crop_fname), face_crop)
+                            if face_crop is not None:
+                                crop_fname = f"advanced_{session.id}_{tracker_id}.jpg"
+                                cv2.imwrite(os.path.join(VISITOR_CROPS_DIR, crop_fname), face_crop)
                         except Exception:
                             pass
 
-                    # Separate dedicated thresholds for Face (ArcFace) vs Body ReID (OSNet), configurable via env
                     env_face_thresh = os.getenv("ADVANCED_FACE_SIMILARITY_THRESHOLD")
                     FACE_SIMILARITY_THRESHOLD = float(env_face_thresh) if env_face_thresh is not None else map_similarity_threshold(similarity_threshold)
                     REID_SIMILARITY_THRESHOLD = float(os.getenv("ADVANCED_REID_SIMILARITY_THRESHOLD", getattr(settings, "ADVANCED_REID_SIMILARITY_THRESHOLD", 0.80)))
 
-                    # PHASE 1: Try Face Recognition against Employee Cache if clear face is available
+                    # PHASE 1: Face Recognition against Employee Cache
                     match_emp = None
                     if track_employees and employee_cache and face_embedding is not None:
                         match_emp = find_best_match_in_cache(face_embedding, employee_cache, FACE_SIMILARITY_THRESHOLD)
 
                     if match_emp:
                         employee, sim = match_emp
-                        # Prevent same-frame identity collision: Ensure another active track hasn't claimed this employee
                         claimed_by_other = any(
                             t_id != tracker_id and t.get("employee_id") == employee.id and t.get("face_confirmed")
                             for t_id, t in active_tracks.items()
@@ -465,6 +496,11 @@ async def _process_video_job(
                             track_info["identity_confidence"] = float(sim)
                             track_info["face_confirmed"] = True
 
+                            logger.info(
+                                f"{CLR_GRN}  👤 [Track #{tracker_id}] EMPLOYEE IDENTIFIED: {track_info['employee_name']} "
+                                f"(Code: {track_info['employee_code']}) | Face Confidence: {sim*100:.1f}%{CLR_RST}"
+                            )
+
                             # Register/retrieve employee identity in Advanced Analytics
                             emp_identity = await repo.get_or_create_employee_identity(
                                 tenant_id=session.tenant_id,
@@ -473,11 +509,10 @@ async def _process_video_job(
                             )
                             track_info["identity_id"] = emp_identity.id
 
-                            # Deactivate yesterday's appearance embeddings for this employee
-                            today_date = datetime.now(timezone.utc).date()
-                            await repo.deactivate_old_appearance_embeddings(emp_identity.id, today_date)
+                            # Deactivate older appearance embeddings for this employee (older than video_date)
+                            await repo.deactivate_old_appearance_embeddings(emp_identity.id, video_date)
 
-                            # Save Today's Body/Clothes Appearance Embedding ONLY on genuine face confirmation
+                            # Save Video Date's Body/Clothes Appearance Embedding ONLY on genuine face confirmation
                             if track_info["reid_embedding"]:
                                 await repo.create_person_embedding(
                                     identity_id=emp_identity.id,
@@ -487,21 +522,30 @@ async def _process_video_job(
                                     embedding_type="appearance",
                                     is_segmented=track_info.get("is_segmented", person_mask is not None),
                                     mask_coverage=track_info.get("mask_coverage"),
-                                    recorded_date=today_date,
+                                    recorded_date=video_date,
                                     is_active=True,
                                     face_anchored=True
                                 )
 
-                    # PHASE 2: If no face matched or face is not visible, check Full-Body ReID Appearance with strict 0.82 threshold
+                    # PHASE 2: If no face matched or face is not visible, check Full-Body ReID Appearance in memory (0ms)
                     elif track_info["reid_embedding"] and not track_info["face_confirmed"]:
                         match_vis = None
-                        if track_repeat_visitors:
-                            match_vis = await repo.find_similar_visitor(
-                                session.tenant_id, track_info["reid_embedding"], REID_SIMILARITY_THRESHOLD, class_id=0
-                            )
+                        if track_repeat_visitors and session_reid_cache:
+                            t_vec = np.array(track_info["reid_embedding"], dtype=np.float32)
+                            t_norm = np.linalg.norm(t_vec)
+                            if t_norm > 0:
+                                t_unit = t_vec / t_norm
+                                best_vis, best_sim = None, 0.0
+                                for v_ident, v_emb in session_reid_cache:
+                                    sim = float(np.dot(t_unit, v_emb))
+                                    if sim >= REID_SIMILARITY_THRESHOLD and sim > best_sim:
+                                        best_sim = sim
+                                        best_vis = v_ident
+                                if best_vis is not None:
+                                    match_vis = (best_vis, best_sim)
+
                         if match_vis:
                             visitor, sim = match_vis
-                            # Prevent same-frame identity collision
                             claimed_by_other = any(
                                 t_id != tracker_id and t.get("identity_id") == visitor.id
                                 for t_id, t in active_tracks.items()
@@ -519,16 +563,36 @@ async def _process_video_job(
                                         track_info["employee_code"] = emp_obj.employee_code
                                     else:
                                         track_info["employee_name"] = visitor.visitor_name or "Employee"
+                                    logger.info(
+                                        f"{CLR_YG}  👤 [Track #{tracker_id}] EMPLOYEE RE-MATCHED VIA REID: {track_info['employee_name']} "
+                                        f"| ReID Similarity: {sim*100:.1f}%{CLR_RST}"
+                                    )
                                 elif visitor.visitor_name:
                                     track_info["visitor_name"] = visitor.visitor_name
+                                    logger.info(
+                                        f"{CLR_CYAN}  🏷️ [Track #{tracker_id}] RETURNING VISITOR MATCHED: {visitor.visitor_name} "
+                                        f"| ReID Similarity: {sim*100:.1f}%{CLR_RST}"
+                                    )
+                                else:
+                                    logger.info(
+                                        f"{CLR_CYAN}  🏷️ [Track #{tracker_id}] VISITOR MATCHED: Identity {str(visitor.id)[:8]} "
+                                        f"| ReID Similarity: {sim*100:.1f}%{CLR_RST}"
+                                    )
 
                         elif register_new_visitors and track_info["identity_id"] is None:
                             visitor = await repo.create_person_identity(session.tenant_id, class_id=0)
                             track_info["identity_id"] = visitor.id
                             track_info["identity_source"] = "reid"
-                            track_info["identity_confidence"] = 0.40  # Initial unverified visitor confidence
+                            track_info["identity_confidence"] = 0.40
 
-                            today_date = datetime.now(timezone.utc).date()
+                            # Add to in-memory cache for instant matching on future frames
+                            t_v = np.array(track_info["reid_embedding"], dtype=np.float32)
+                            t_n = np.linalg.norm(t_v)
+                            if t_n > 0:
+                                session_reid_cache.append((visitor, t_v / t_n))
+
+                            logger.info(f"{CLR_YEL}  ✨ [Track #{tracker_id}] NEW VISITOR REGISTERED: Identity {str(visitor.id)[:8]}{CLR_RST}")
+
                             await repo.create_person_embedding(
                                 identity_id=visitor.id,
                                 embedding=track_info["reid_embedding"],
@@ -537,7 +601,7 @@ async def _process_video_job(
                                 embedding_type="appearance",
                                 is_segmented=track_info.get("is_segmented", person_mask is not None),
                                 mask_coverage=track_info.get("mask_coverage"),
-                                recorded_date=today_date,
+                                recorded_date=video_date,
                                 is_active=True,
                                 face_anchored=False
                             )
@@ -631,7 +695,8 @@ async def _process_video_job(
                 cv2.putText(frame, f"Occupancy: {current_occupancy}  |  Peak: {peak_occupancy_so_far}", (20, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
                 cv2.putText(frame, f"Gate Line  --> IN: {in_cnt}   <-- OUT: {out_cnt}", (20, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
 
-        output_writer.write(frame)
+        out_frame = cv2.resize(frame, (vid_w, vid_h)) if scale_factor < 1.0 else frame
+        output_writer.write(out_frame)
 
     cap.release()
     output_writer.release()
@@ -641,18 +706,29 @@ async def _process_video_job(
     emp_repo = EmployeeRepository(db)
 
     camera_name = session.video_name
+    zone_name = None
     if session.camera_node_id:
         c_node = await repo.get_camera_node_by_id(session.camera_node_id, session.tenant_id)
         if c_node:
             camera_name = c_node.name
+            zone_name = c_node.location_label or c_node.name
+    else:
+        base_name = os.path.splitext(session.video_name)[0]
+        camera_name = base_name.replace("-t", "").replace("_", " ").title()
+        zone_name = f"{camera_name} Area"
+
     for tracker_id, info in active_tracks.items():
         started_at = to_real_time(info["first_seen"])
         ended_at = to_real_time(info["last_seen"])
+        
+        track_zone = ", ".join(info.get("current_zones", [])) if info.get("current_zones") else zone_name
+
         await repo.create_timeline_event(
             tenant_id=session.tenant_id,
             person_type=info["person_type"],
             session_id=session.id,
             camera_name=camera_name,
+            zone_name=track_zone,
             event_type="presence",
             started_at=started_at,
             ended_at=ended_at,

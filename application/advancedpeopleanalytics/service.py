@@ -385,6 +385,20 @@ class AdvancedPeopleAnalyticsService:
 
     async def delete_session(self, session_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
         session = await self.get_session(session_id, tenant_id)
+
+        # Signal immediate background task cancellation via Redis
+        try:
+            from database.redis import get_redis_client, init_redis
+            redis_client = get_redis_client()
+            if redis_client is None:
+                await init_redis()
+                redis_client = get_redis_client()
+            if redis_client:
+                await redis_client.setex(f"advancedpeopleanalytics:cancelled:{session_id}", 3600, "1")
+                await redis_client.delete(f"advancedpeopleanalytics:progress:{session_id}")
+        except Exception:
+            pass
+
         if session.output_video_path and os.path.exists(session.output_video_path):
             try:
                 os.remove(session.output_video_path)
