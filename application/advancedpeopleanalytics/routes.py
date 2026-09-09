@@ -465,6 +465,7 @@ async def process_batch_sessions(
         global_track_repeat_visitors=request.track_repeat_visitors,
         global_line_crossing_analysis=request.line_crossing_analysis,
         global_track_occupancy=request.track_occupancy,
+        global_generate_video=request.generate_video,
         user_id=current_user.id
     )
     return StandardResponse(
@@ -551,19 +552,44 @@ async def stream_annotated_video(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Video cannot be retrieved. Session status is currently '{session.status}'."
         )
-    if not session.output_video_path or not os.path.exists(session.output_video_path):
+
+    target_video_path = session.output_video_path if (session.output_video_path and os.path.exists(session.output_video_path)) else session.video_path
+    if not target_video_path or not os.path.exists(target_video_path):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Annotated video file is missing or not generated on disk."
+            detail="Video file is missing or not found on disk."
         )
 
-    file_ext = os.path.splitext(session.output_video_path)[1].lower()
-    media_type = "image/jpeg" if file_ext == ".jpg" else "video/mp4"
+    file_ext = os.path.splitext(target_video_path)[1].lower()
+    media_type = "image/jpeg" if file_ext in (".jpg", ".jpeg") else "video/mp4"
 
     return FileResponse(
-        path=session.output_video_path,
+        path=target_video_path,
         media_type=media_type,
         filename=f"{session_id}{file_ext}"
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/rerun",
+    response_model=StandardResponse[AdvancedPeopleAnalyticsSessionResponse],
+    status_code=status.HTTP_202_ACCEPTED
+)
+async def rerun_analytics_session(
+    session_id: uuid.UUID,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Rerun video analytics for a previously created session using its original video file and parameters.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    session = await service.rerun_session(session_id, tenant_id, current_user.id)
+    return StandardResponse(
+        message=f"Session {session_id} rerun initiated successfully.",
+        status=status.HTTP_202_ACCEPTED,
+        data=AdvancedPeopleAnalyticsSessionResponse.model_validate(session)
     )
 
 

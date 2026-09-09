@@ -28,6 +28,7 @@ from modules.employees.model import Employee
 from modules.peopleanalytics.repository import PeopleAnalyticsRepository
 from services.ai.people_analytics import LineCrossingCounter
 from services.ai.face_recognition import face_rec_service
+from application.utils.reid import reid_service
 from services.ai.math_utils import map_similarity_threshold, find_best_match_in_cache, is_face_occluded
 from modules.employees.cache import get_cached_employee_embeddings
 
@@ -475,6 +476,7 @@ async def _process_video_job(
 
     # Tracking states
     active_tracks = {}
+    reid_memory_bank = {}  # Sliding memory bank for occlusion stitching: {tracker_id: {reid_vec, id, type, label, color, last_seen, face_shots_count, feature_locked}}
     completed_occurrences = []
     completed_attendance = []
     completed_visitor_attendance = []
@@ -488,7 +490,7 @@ async def _process_video_job(
     exit_count = None
     peak_occupancy_so_far = 0
 
-    frame_step = max(1, int(processing_fps / 2))  # Process face recognition twice per second
+    frame_step = max(1, int(processing_fps / 2))  # Sample face recognition at ~2 Hz per unconfirmed track
     raw_frame_idx = 0
     processed_frame_idx = 0
     
@@ -560,12 +562,14 @@ async def _process_video_job(
             peak_occupancy_so_far = current_occupancy
 
         is_face_analysis_needed = track_employees or register_new_visitors or track_repeat_visitors
+        current_frame_tracker_ids = set()
 
         if detections.tracker_id is not None:
             for xyxy, class_id, tracker_id in zip(detections.xyxy, detections.class_id, detections.tracker_id):
                 if tracker_id is None:
                     continue
 
+                current_frame_tracker_ids.add(tracker_id)
                 x1, y1, x2, y2 = map(int, xyxy)
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(out_w, x2), min(out_h, y2)
@@ -577,22 +581,64 @@ async def _process_video_job(
                 if tracker_id not in active_tracks:
                     crop = frame[y1:y2, x1:x2]
                     now_ts = datetime.now(timezone.utc)
-                    active_tracks[tracker_id] = {
-                        "type": "visitor",
-                        "id": None,
-                        "first_seen": timestamp_sec,
-                        "last_seen": timestamp_sec,
-                        "first_seen_timestamp": now_ts,
-                        "last_seen_timestamp": now_ts,
-                        "occurrences": 1,
-                        "label": f"Track #{tracker_id}",
-                        "color": (200, 200, 200),
-                        "best_crop": crop if crop is not None and crop.size > 0 else None,
-                        "best_crop_area": (x2 - x1) * (y2 - y1) if crop is not None and crop.size > 0 else 0,
-                        "matched": False,
-                        "last_match_area": 0,
-                        "frames_since_start": 1
-                    }
+                    reid_vec = reid_service.extract_embedding(crop) if (crop is not None and crop.size > 0) else None
+
+                    # Check Spatial-Temporal ReID Memory Bank for stitching (e.g. occlusion / turn recovery)
+                    stitched_match = None
+                    if reid_vec is not None and reid_memory_bank:
+                        best_sim = 0.0
+                        best_bank_key = None
+                        for bank_tid, bank_data in list(reid_memory_bank.items()):
+                            # TTL: check within 45 seconds window
+                            if (timestamp_sec - bank_data["last_seen"]) <= 45.0 and bank_data.get("reid_vec") is not None:
+                                sim = float(np.dot(reid_vec, bank_data["reid_vec"]))
+                                if sim > best_sim and sim >= 0.75:
+                                    best_sim = sim
+                                    best_bank_key = bank_tid
+                        
+                        if best_bank_key is not None:
+                            stitched_match = reid_memory_bank.pop(best_bank_key)
+
+                    if stitched_match:
+                        active_tracks[tracker_id] = {
+                            "type": stitched_match["type"],
+                            "id": stitched_match["id"],
+                            "first_seen": stitched_match["first_seen"],
+                            "last_seen": timestamp_sec,
+                            "first_seen_timestamp": stitched_match["first_seen_timestamp"],
+                            "last_seen_timestamp": now_ts,
+                            "occurrences": stitched_match.get("occurrences", 1) + 1,
+                            "label": stitched_match["label"],
+                            "color": stitched_match["color"],
+                            "best_crop": crop if crop is not None and crop.size > 0 else stitched_match.get("best_crop"),
+                            "best_crop_area": (x2 - x1) * (y2 - y1) if crop is not None and crop.size > 0 else stitched_match.get("best_crop_area", 0),
+                            "matched": True,
+                            "feature_locked": stitched_match.get("feature_locked", True),
+                            "face_shots_count": stitched_match.get("face_shots_count", 2),
+                            "reid_vec": reid_vec,
+                            "last_match_area": 0,
+                            "frames_since_start": 1
+                        }
+                    else:
+                        active_tracks[tracker_id] = {
+                            "type": "visitor",
+                            "id": None,
+                            "first_seen": timestamp_sec,
+                            "last_seen": timestamp_sec,
+                            "first_seen_timestamp": now_ts,
+                            "last_seen_timestamp": now_ts,
+                            "occurrences": 1,
+                            "label": f"Track #{tracker_id}",
+                            "color": (200, 200, 200),
+                            "best_crop": crop if crop is not None and crop.size > 0 else None,
+                            "best_crop_area": (x2 - x1) * (y2 - y1) if crop is not None and crop.size > 0 else 0,
+                            "matched": False,
+                            "feature_locked": False,
+                            "face_shots_count": 0,
+                            "reid_vec": reid_vec,
+                            "last_match_area": 0,
+                            "frames_since_start": 1
+                        }
                 else:
                     # Update last seen timestamp and best crop info
                     track_info = active_tracks[tracker_id]
@@ -609,30 +655,32 @@ async def _process_video_job(
 
                 track_info = active_tracks[tracker_id]
                 
-                # Check for face inside the localized person crop
+                # Check for face inside the localized person crop using 2-Shot Feature Locking
                 matched_face = None
-                # Run face detection periodically if face analysis is needed and track is not fully employee-matched yet
-                if is_face_analysis_needed and (not track_info["matched"] or track_info["type"] == "visitor") and frame_idx % frame_step == 0:
+                should_run_face = (
+                    is_face_analysis_needed and
+                    not track_info.get("feature_locked", False) and
+                    track_info.get("face_shots_count", 0) < 2 and
+                    (processed_frame_idx % frame_step == 0)
+                )
+
+                if should_run_face:
                     crop = frame[y1:y2, x1:x2]
                     if crop is not None and crop.size > 0:
-                        _, encoded_img = cv2.imencode(".jpg", crop)
-                        crop_bytes = encoded_img.tobytes()
                         try:
-                            faces = face_rec_service.extract_faces(crop_bytes)
+                            # Zero-copy direct NumPy array inference
+                            faces = face_rec_service.extract_faces_from_image(crop)
                         except Exception:
                             faces = []
 
-                        # Apply the 4 face visibility/quality filters
+                        # Apply face visibility/quality filters
                         valid_faces = []
                         for face in faces:
                             fx1, fy1, fx2, fy2 = map(int, face["bbox"])
-                            # 1. Size filter
-                            if (fx2 - fx1) < 45 or (fy2 - fy1) < 45:
+                            if (fx2 - fx1) < 40 or (fy2 - fy1) < 40:
                                 continue
-                            # 2. Confidence filter
-                            if face.get("det_score", 0.0) < 0.70:
+                            if face.get("det_score", 0.0) < 0.65:
                                 continue
-                            # 3. Keypoints containment filter
                             kps = face.get("kps")
                             is_full_face = True
                             if kps:
@@ -649,17 +697,16 @@ async def _process_video_job(
                                         break
                             if not is_full_face:
                                 continue
-                            # 4. Occlusion filter
                             if is_face_occluded(crop, kps):
                                 continue
                             valid_faces.append(face)
 
                         if valid_faces:
-                            # Take the largest face detected in the crop
                             matched_face = max(valid_faces, key=lambda f: (f["bbox"][2] - f["bbox"][0]) * (f["bbox"][3] - f["bbox"][1]))
+                            track_info["face_shots_count"] = track_info.get("face_shots_count", 0) + 1
 
                 # Match if face analysis is needed, face is found, and person is not employee-matched
-                if is_face_analysis_needed and (not track_info["matched"] or track_info["type"] == "visitor") and matched_face is not None:
+                if is_face_analysis_needed and not track_info.get("feature_locked", False) and matched_face is not None:
                     face_embedding = np.array(matched_face["embedding"], dtype=np.float32)
                     mapped_threshold = map_similarity_threshold(similarity_threshold)
 
@@ -691,7 +738,8 @@ async def _process_video_job(
                             "id": employee.id,
                             "label": f"{employee.first_name} (EMP)",
                             "color": (0, 255, 0),
-                             "matched": True
+                            "matched": True,
+                            "feature_locked": True  # Lock further inference once matched to employee
                         })
                         unique_seen_identities.add(f"employee:{employee.id}")
                     else:
@@ -732,6 +780,26 @@ async def _process_video_job(
                                 })
                                 unique_seen_identities.add(f"visitor:{visitor.id}")
                                 first_time_visitors_count += 1
+
+                    # Lock feature extraction once max shots reached
+                    if track_info.get("face_shots_count", 0) >= 2:
+                        track_info["feature_locked"] = True
+
+                # Update Memory Bank for recent tracks
+                if track_info.get("reid_vec") is not None and track_info.get("id") is not None:
+                    reid_memory_bank[tracker_id] = {
+                        "reid_vec": track_info["reid_vec"],
+                        "id": track_info["id"],
+                        "type": track_info["type"],
+                        "label": track_info["label"],
+                        "color": track_info["color"],
+                        "first_seen": track_info["first_seen"],
+                        "first_seen_timestamp": track_info["first_seen_timestamp"],
+                        "last_seen": timestamp_sec,
+                        "occurrences": track_info.get("occurrences", 1),
+                        "feature_locked": track_info.get("feature_locked", False),
+                        "face_shots_count": track_info.get("face_shots_count", 0)
+                    }
 
                 # Update line crossing
                 if line_counter:

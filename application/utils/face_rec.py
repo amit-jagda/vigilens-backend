@@ -71,5 +71,33 @@ class FaceRecognitionService:
             
         return results
 
+    def extract_faces_from_image(self, img_bgr: np.ndarray, model_name: str = "buffalo_l") -> list[dict]:
+        """
+        Extracts bounding boxes and embeddings for all detected faces directly from a BGR numpy array.
+        Zero-copy, avoids in-memory byte re-encoding.
+        """
+        if img_bgr is None or img_bgr.size == 0 or img_bgr.shape[0] < 10 or img_bgr.shape[1] < 10:
+            return []
+
+        self._lazy_init(model_name)
+        app = self.apps[model_name]
+
+        # Detect faces and extract embeddings
+        faces = app.get(img_bgr)
+
+        results = []
+        for i, face in enumerate(faces):
+            results.append({
+                "face_idx": i,
+                "bbox": [int(x) for x in face.bbox],
+                "embedding": face.embedding.tolist(),
+                "det_score": float(face.det_score) if hasattr(face, "det_score") else 0.0,
+                "kps": face.kps.tolist() if getattr(face, "kps", None) is not None else None,
+                "gender": int(face.gender) if getattr(face, "gender", None) is not None else None,
+                "age": int(face.age) if getattr(face, "age", None) is not None else None
+            })
+
+        return results
+
 # Self-contained singleton instance
 face_rec_service = FaceRecognitionService()

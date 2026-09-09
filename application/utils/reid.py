@@ -52,5 +52,43 @@ class ReIDService:
             print(f"[ReIDService] Embedding extraction error: {e}")
             return None
 
+    @torch.no_grad()
+    def extract_embeddings_batch(self, crops: list[np.ndarray]) -> list[Optional[np.ndarray]]:
+        """
+        Extracts normalized 512-dimensional visual embeddings for a batch of person crops (BGR).
+        Performs a single forward pass over the batch.
+        """
+        if not crops:
+            return []
+        
+        valid_indices = []
+        tensors = []
+        for idx, crop in enumerate(crops):
+            if crop is not None and crop.size > 0 and crop.shape[0] >= 10 and crop.shape[1] >= 10:
+                try:
+                    crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                    tensor = self.transform(crop_rgb)
+                    tensors.append(tensor)
+                    valid_indices.append(idx)
+                except Exception:
+                    pass
+        
+        results: list[Optional[np.ndarray]] = [None] * len(crops)
+        if not tensors:
+            return results
+            
+        try:
+            batch_tensor = torch.stack(tensors).to(self.device)
+            features = self.feature_extractor(batch_tensor)
+            features = nn.functional.normalize(features, p=2, dim=1)
+            features_np = features.cpu().numpy().astype(np.float32)
+            
+            for list_pos, orig_idx in enumerate(valid_indices):
+                results[orig_idx] = features_np[list_pos]
+        except Exception as e:
+            print(f"[ReIDService] Batch extraction error: {e}")
+            
+        return results
+
 # Singleton instance
 reid_service = ReIDService()

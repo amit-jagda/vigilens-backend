@@ -45,6 +45,34 @@ class FaceRecognitionService:
                 )
                 raise e
 
+    def extract_faces_from_image(self, img_bgr: np.ndarray, model_name: str = "buffalo_l") -> list[dict]:
+        """
+        Extracts bounding boxes and embeddings for all detected faces directly from a BGR numpy array.
+        Zero-copy, avoids in-memory byte re-encoding.
+        """
+        if img_bgr is None or img_bgr.size == 0 or img_bgr.shape[0] < 10 or img_bgr.shape[1] < 10:
+            return []
+
+        self._lazy_init(model_name)
+        app = self.apps[model_name]
+
+        # Detect faces and extract embeddings
+        faces = app.get(img_bgr)
+
+        results = []
+        for i, face in enumerate(faces):
+            results.append({
+                "face_idx": i,
+                "bbox": [int(x) for x in face.bbox],
+                "embedding": face.embedding.tolist(),
+                "det_score": float(face.det_score) if hasattr(face, "det_score") else 0.0,
+                "kps": face.kps.tolist() if getattr(face, "kps", None) is not None else None,
+                "gender": int(face.gender) if getattr(face, "gender", None) is not None else None,
+                "age": int(face.age) if getattr(face, "age", None) is not None else None
+            })
+
+        return results
+
     def extract_faces(self, image_bytes: bytes, model_name: str = "buffalo_l") -> list[dict]:
         """
         Decodes the image from bytes and extracts bounding boxes and embeddings for all detected faces.
@@ -55,9 +83,6 @@ class FaceRecognitionService:
                 "bbox": list[int] [x1, y1, x2, y2]
                 "embedding": list[float] (512 dimensions)
         """
-        self._lazy_init(model_name)
-        app = self.apps[model_name]
-        
         img = None
         # Try decoding with Pillow (supports HEIC, WebP, JPEG, PNG, etc.)
         try:
@@ -75,22 +100,7 @@ class FaceRecognitionService:
         if img is None:
             raise ValueError("Invalid image file format or corrupted image bytes.")
 
-        # Detect faces and extract embeddings
-        faces = app.get(img)
-        
-        results = []
-        for i, face in enumerate(faces):
-            results.append({
-                "face_idx": i,
-                "bbox": [int(x) for x in face.bbox],
-                "embedding": face.embedding.tolist(),
-                "det_score": float(face.det_score) if hasattr(face, "det_score") else 0.0,
-                "kps": face.kps.tolist() if getattr(face, "kps", None) is not None else None,
-                "gender": int(face.gender) if getattr(face, "gender", None) is not None else None,
-                "age": int(face.age) if getattr(face, "age", None) is not None else None
-            })
-            
-        return results
+        return self.extract_faces_from_image(img, model_name=model_name)
 
     def load_search_embeddings(self, selfie_path: str | None, fallback_embedding: list[float], model_name: str = "buffalo_l") -> list[np.ndarray]:
         """

@@ -243,6 +243,7 @@ class AdvancedPeopleAnalyticsService:
         global_track_repeat_visitors: bool = True,
         global_line_crossing_analysis: bool = True,
         global_track_occupancy: bool = True,
+        global_generate_video: bool = False,
         user_id: Optional[uuid.UUID] = None
     ) -> List[AdvancedPeopleAnalyticsSession]:
         from modules.gallery.repository import GalleryRepository
@@ -292,6 +293,7 @@ class AdvancedPeopleAnalyticsService:
             track_repeat_visitors = item.track_repeat_visitors if item.track_repeat_visitors is not None else global_track_repeat_visitors
             line_crossing_analysis = item.line_crossing_analysis if item.line_crossing_analysis is not None else global_line_crossing_analysis
             track_occupancy = item.track_occupancy if item.track_occupancy is not None else global_track_occupancy
+            generate_video = item.generate_video if item.generate_video is not None else global_generate_video
 
             session = await self.repo.create_analytics_session(
                 tenant_id=tenant_id,
@@ -306,6 +308,7 @@ class AdvancedPeopleAnalyticsService:
                 track_repeat_visitors=track_repeat_visitors,
                 line_crossing_analysis=line_crossing_analysis,
                 track_occupancy=track_occupancy,
+                generate_video=generate_video,
                 camera_node_id=item.camera_node_id,
                 recording_started_at=item.recording_started_at
             )
@@ -326,7 +329,8 @@ class AdvancedPeopleAnalyticsService:
                 register_new_visitors,
                 track_repeat_visitors,
                 line_crossing_analysis,
-                track_occupancy
+                track_occupancy,
+                generate_video
             )
 
             sessions.append(session)
@@ -407,6 +411,86 @@ class AdvancedPeopleAnalyticsService:
         await self.repo.delete_session(session_id, tenant_id)
         await self.db.commit()
         return True
+
+    async def rerun_session(
+        self,
+        session_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        user_id: Optional[uuid.UUID] = None
+    ) -> AdvancedPeopleAnalyticsSession:
+        session = await self.repo.get_session_by_id(session_id, tenant_id)
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Analytics session not found or unauthorized access."
+            )
+
+        if not session.video_path or not os.path.exists(session.video_path):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Original video file for this session is missing or no longer available on disk."
+            )
+
+        # Clear existing detection logs, crossings, and events
+        await self.repo.clear_session_results(session.id)
+
+        # Reset session state
+        session.status = "processing"
+        session.unique_person_count = None
+        session.total_person_count = None
+        session.first_time_visitor_count = None
+        session.peak_occupancy = None
+        session.average_occupancy = None
+        session.entry_count = None
+        session.exit_count = None
+        session.employee_count = None
+        session.visitor_count = None
+        session.occupancy_timeline = None
+        session.completed_at = None
+
+        if session.output_video_path and os.path.exists(session.output_video_path):
+            try:
+                os.remove(session.output_video_path)
+            except Exception:
+                pass
+        session.output_video_path = None
+
+        await self.db.commit()
+        await self.db.refresh(session)
+
+        # Reset redis progress & cancellation flags
+        try:
+            from database.redis import get_redis_client, init_redis
+            redis_client = get_redis_client()
+            if redis_client is None:
+                await init_redis()
+                redis_client = get_redis_client()
+            if redis_client:
+                await redis_client.delete(f"advancedpeopleanalytics:cancelled:{session.id}")
+                await redis_client.setex(f"advancedpeopleanalytics:progress:{session.id}", 3600, "0")
+        except Exception:
+            pass
+
+        # Re-dispatch Celery worker task with stored session parameters
+        from application.advancedpeopleanalytics.tasks import process_advanced_people_analytics_task
+        process_advanced_people_analytics_task.delay(
+            str(session.id),
+            session.video_path,
+            session.line_start,
+            session.line_end,
+            session.similarity_threshold,
+            session.confidence_threshold,
+            str(user_id) if user_id else (str(session.created_by_id) if session.created_by_id else None),
+            session.track_employees,
+            session.register_new_visitors,
+            session.track_repeat_visitors,
+            session.line_crossing_analysis,
+            session.track_occupancy,
+            session.generate_video
+        )
+
+        session.completed_percentage = 0
+        return session
 
     async def register_or_update_visitor(
         self,

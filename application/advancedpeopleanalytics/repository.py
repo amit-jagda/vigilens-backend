@@ -415,6 +415,7 @@ class AdvancedPeopleAnalyticsRepository:
         track_repeat_visitors: bool = True,
         line_crossing_analysis: bool = True,
         track_occupancy: bool = True,
+        generate_video: bool = False,
         camera_node_id: Optional[uuid.UUID] = None,
         recording_started_at: Optional[datetime.datetime] = None
     ) -> AdvancedPeopleAnalyticsSession:
@@ -431,6 +432,7 @@ class AdvancedPeopleAnalyticsRepository:
             track_repeat_visitors=track_repeat_visitors,
             line_crossing_analysis=line_crossing_analysis,
             track_occupancy=track_occupancy,
+            generate_video=generate_video,
             camera_node_id=camera_node_id,
             recording_started_at=recording_started_at,
             status="pending"
@@ -519,6 +521,19 @@ class AdvancedPeopleAnalyticsRepository:
         )
         await self.db.flush()
         return True
+
+    async def clear_session_results(self, session_id: uuid.UUID):
+        """
+        Clears all past detection records, logs, and events for a session prior to rerunning.
+        """
+        await self.db.execute(delete(AdvancedEmployeeAttendanceLog).where(AdvancedEmployeeAttendanceLog.session_id == session_id))
+        await self.db.execute(delete(AdvancedEmployeeSessionDetection).where(AdvancedEmployeeSessionDetection.session_id == session_id))
+        await self.db.execute(delete(AdvancedVisitorAttendanceLog).where(AdvancedVisitorAttendanceLog.session_id == session_id))
+        await self.db.execute(delete(AdvancedPersonOccurrence).where(AdvancedPersonOccurrence.session_id == session_id))
+        await self.db.execute(delete(AdvancedLineCrossingLog).where(AdvancedLineCrossingLog.session_id == session_id))
+        await self.db.execute(delete(ZoneCrossingEvent).where(ZoneCrossingEvent.session_id == session_id))
+        await self.db.execute(delete(PersonTimelineEvent).where(PersonTimelineEvent.session_id == session_id))
+        await self.db.flush()
 
     async def get_or_create_employee_identity(
         self,

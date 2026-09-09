@@ -148,6 +148,7 @@ class AdvancedVideoProcessItem(BaseModel):
     track_repeat_visitors: Optional[bool] = None
     line_crossing_analysis: Optional[bool] = None
     track_occupancy: Optional[bool] = None
+    generate_video: Optional[bool] = None
     camera_node_id: Optional[uuid.UUID] = None
     recording_started_at: Optional[datetime.datetime] = None
 
@@ -163,6 +164,7 @@ class ProcessAdvancedVideosRequest(BaseModel):
     track_repeat_visitors: bool = True
     line_crossing_analysis: bool = True
     track_occupancy: bool = True
+    generate_video: bool = False
 
 
 class AdvancedPeopleAnalyticsSessionResponse(BaseModel):
@@ -184,6 +186,7 @@ class AdvancedPeopleAnalyticsSessionResponse(BaseModel):
     track_repeat_visitors: bool
     line_crossing_analysis: bool
     track_occupancy: bool
+    generate_video: bool = False
     unique_person_count: Optional[int] = None
     total_person_count: Optional[int] = None
     first_time_visitor_count: Optional[int] = None

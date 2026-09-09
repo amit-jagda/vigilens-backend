@@ -12,7 +12,18 @@ MODELS_DIR = os.path.join(_BASE_DIR, "models")
 # Standard YOLO public CDN urls for auto-download if missing
 MODEL_URLS = {
     "yolov8n.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt",
+    "yolov8s.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s.pt",
+    "yolov8m.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8m.pt",
+    "yolov8l.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8l.pt",
+    "yolov8x.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8x.pt",
+    "yolov8n-seg.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n-seg.pt",
+    "yolov8s-seg.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-seg.pt",
+    "yolov8m-seg.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8m-seg.pt",
+    "yolov8l-seg.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8l-seg.pt",
+    "yolov8x-seg.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8x-seg.pt",
     "yolov8n-pose.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n-pose.pt",
+    "yolo11n-seg.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-seg.pt",
+    "yolo11s-seg.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11s-seg.pt",
     "yolo12n.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo12n.pt",
     "yolo12m.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo12m.pt",
     "yolo26n.pt": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.pt",
@@ -48,9 +59,12 @@ def get_model_path(service_name: str, model_filename: str) -> str:
             shutil.copy2(src, target_path)
             return target_path
 
-    # Auto-download for standard YOLO assets if URL is defined
-    if model_filename in MODEL_URLS:
-        url = MODEL_URLS[model_filename]
+    # Auto-download for standard YOLO assets if URL is defined or standard format
+    url = MODEL_URLS.get(model_filename)
+    if not url and (model_filename.startswith("yolov8") or model_filename.startswith("yolo11")):
+        url = f"https://github.com/ultralytics/assets/releases/download/v8.3.0/{model_filename}"
+
+    if url:
         logger.info(f"Downloading model {model_filename} from {url} to {target_path}...")
         print(f"Downloading model {model_filename} from {url} to {target_path}...")
         try:

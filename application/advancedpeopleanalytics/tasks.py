@@ -62,6 +62,21 @@ VISITOR_CROPS_DIR = os.path.join("storage", "visitor_crops")
 os.makedirs(VISITOR_CROPS_DIR, exist_ok=True)
 
 
+def get_model_scale_label(model_name: str) -> str:
+    name = str(model_name).lower()
+    if any(k in name for k in ["nano", "8n", "11n", "26n", "yolon", "-n."]):
+        return "NANO"
+    elif any(k in name for k in ["small", "8s", "11s", "26s", "yolos", "-s."]):
+        return "SMALL"
+    elif any(k in name for k in ["medium", "8m", "11m", "26m", "yolom", "-m."]):
+        return "MEDIUM"
+    elif any(k in name for k in ["large", "8l", "11l", "26l", "yolol", "-l."]):
+        return "LARGE"
+    elif any(k in name for k in ["xlarge", "8x", "11x", "26x", "yolox", "-x."]):
+        return "XLARGE"
+    return "CUSTOM"
+
+
 @celery_app.task(name="application.advancedpeopleanalytics.tasks.process_advanced_people_analytics_task")
 def process_advanced_people_analytics_task(
     session_id_str: str,
@@ -75,7 +90,8 @@ def process_advanced_people_analytics_task(
     register_new_visitors: bool = True,
     track_repeat_visitors: bool = True,
     line_crossing_analysis: bool = True,
-    track_occupancy: bool = True
+    track_occupancy: bool = True,
+    generate_video: bool = False
 ):
     """
     Celery background task for Advanced People Analytics Suite with ReID & Spatial Topology.
@@ -99,7 +115,7 @@ def process_advanced_people_analytics_task(
             await db.commit()
 
             try:
-                logger.info(f"Advanced People Analytics processing started for session ID {session_id}. File: {filepath}")
+                logger.info(f"Advanced People Analytics processing started for session ID {session_id}. File: {filepath} (generate_video={generate_video})")
                 from services.storage import storage_client
                 local_filepath = storage_client.get_file_path(filepath)
 
@@ -117,6 +133,7 @@ def process_advanced_people_analytics_task(
                     await init_redis()
 
                 employee_cache = await get_cached_employee_embeddings(db, session.tenant_id)
+                logger.info(f"👥 [Session {session.id}] Loaded {len(employee_cache)} registered employee face embedding(s) for tenant {session.tenant_id}")
 
                 from configs.base import settings
                 from shared.utils.model_loader import get_model_path
@@ -130,7 +147,8 @@ def process_advanced_people_analytics_task(
                         employee_cache=employee_cache, similarity_threshold=similarity_threshold,
                         confidence_threshold=confidence_threshold, user_id_str=user_id_str,
                         track_employees=track_employees, register_new_visitors=register_new_visitors,
-                        track_repeat_visitors=track_repeat_visitors, track_occupancy=track_occupancy
+                        track_repeat_visitors=track_repeat_visitors, track_occupancy=track_occupancy,
+                        generate_video=generate_video
                     )
                 else:
                     await _process_video_job(
@@ -139,7 +157,8 @@ def process_advanced_people_analytics_task(
                         similarity_threshold=similarity_threshold, confidence_threshold=confidence_threshold,
                         user_id_str=user_id_str, track_employees=track_employees,
                         register_new_visitors=register_new_visitors, track_repeat_visitors=track_repeat_visitors,
-                        line_crossing_analysis=line_crossing_analysis, track_occupancy=track_occupancy
+                        line_crossing_analysis=line_crossing_analysis, track_occupancy=track_occupancy,
+                        generate_video=generate_video
                     )
 
                 logger.info(f"Advanced People Analytics completed successfully for session ID {session_id}.")
@@ -159,7 +178,8 @@ def process_advanced_people_analytics_task(
 
 async def _process_image_job(
     db, repo, session, filepath, model, employee_cache, similarity_threshold, confidence_threshold, user_id_str=None,
-    track_employees: bool = True, register_new_visitors: bool = True, track_repeat_visitors: bool = True, track_occupancy: bool = True
+    track_employees: bool = True, register_new_visitors: bool = True, track_repeat_visitors: bool = True, track_occupancy: bool = True,
+    generate_video: bool = False
 ):
     try:
         with Image.open(filepath) as pil_img:
@@ -176,14 +196,16 @@ async def _process_image_job(
     boxes = results[0].boxes
 
     total_person_count = len(boxes)
-    output_filename = f"{uuid.uuid4()}_annotated.jpg"
-    user_outputs_dir = os.path.join(ADVANCED_OUTPUTS_DIR, user_id_str) if user_id_str else ADVANCED_OUTPUTS_DIR
-    os.makedirs(user_outputs_dir, exist_ok=True)
-    output_path = os.path.join(user_outputs_dir, output_filename)
-    cv2.imwrite(output_path, img)
+    output_path = None
+    if generate_video:
+        output_filename = f"{uuid.uuid4()}_annotated.jpg"
+        user_outputs_dir = os.path.join(ADVANCED_OUTPUTS_DIR, user_id_str) if user_id_str else ADVANCED_OUTPUTS_DIR
+        os.makedirs(user_outputs_dir, exist_ok=True)
+        output_path = os.path.join(user_outputs_dir, output_filename)
+        cv2.imwrite(output_path, img)
 
-    from services.storage import storage_client
-    storage_client.upload_file(output_path, output_path)
+        from services.storage import storage_client
+        storage_client.upload_file(output_path, output_path)
 
     await repo.update_session_results(
         session_id=session.id,
@@ -195,7 +217,8 @@ async def _process_image_job(
 
 async def _process_video_job(
     db, repo, session, filepath, model, employee_cache, line_start, line_end, similarity_threshold, confidence_threshold, user_id_str=None,
-    track_employees: bool = True, register_new_visitors: bool = True, track_repeat_visitors: bool = True, line_crossing_analysis: bool = True, track_occupancy: bool = True
+    track_employees: bool = True, register_new_visitors: bool = True, track_repeat_visitors: bool = True, line_crossing_analysis: bool = True, track_occupancy: bool = True,
+    generate_video: bool = False
 ):
     cap = cv2.VideoCapture(filepath)
     if not cap.isOpened():
@@ -209,33 +232,46 @@ async def _process_video_job(
     video_rotation = get_video_rotation(filepath)
     out_w, out_h = (orig_height, orig_width) if video_rotation in (90, 270) else (orig_width, orig_height)
 
+    # Determine active model and scale label (LARGE / MEDIUM / SMALL / NANO)
+    seg_model_filename = os.path.basename(getattr(settings, "YOLO_SEG_MODEL", "yolov8n-seg.pt"))
+    model_scale_tag = get_model_scale_label(seg_model_filename)
+    logger.info(f"🤖 [Session {session.id}] ACTIVE MODEL: {seg_model_filename} [{model_scale_tag}]")
+
     # --- CONFIGURABLE ANALYSIS MODE: Full-Frame vs Smart 5 FPS Sampling ---
     env_full_frame = os.getenv("PROCESS_EVERY_FRAME", str(getattr(settings, "PROCESS_EVERY_FRAME", False))).lower() in ("true", "1", "yes")
     if env_full_frame:
         TARGET_FPS = fps
         frame_interval = 1
         processing_fps = fps
-        logger.info(f"🚀 [Session {session.id}] FULL-FRAME MODE ACTIVE: Analyzing 100% of frames ({fps:.1f} FPS, frame_interval=1)")
+        logger.info(f"🚀 [Session {session.id}] [{model_scale_tag}] FULL-FRAME MODE ACTIVE: Analyzing 100% of frames ({fps:.1f} FPS, frame_interval=1)")
     else:
         TARGET_FPS = float(os.getenv("PROCESSING_FPS", os.getenv("ADVANCED_PROCESSING_FPS", getattr(settings, "PROCESSING_FPS", 5.0))))
         frame_interval = max(1, int(round(fps / TARGET_FPS)))
         processing_fps = fps / frame_interval
-        logger.info(f"⚡ [Session {session.id}] SMART SAMPLING ACTIVE: Target {TARGET_FPS} FPS (processing 1 out of every {frame_interval} frames)")
+        logger.info(f"⚡ [Session {session.id}] [{model_scale_tag}] SMART SAMPLING ACTIVE: Target {TARGET_FPS} FPS (processing 1 out of every {frame_interval} frames)")
 
     # Output video max 720p resolution for ultra-fast software encoding
-    MAX_OUT_W, MAX_OUT_H = 1280, 720
-    scale_factor = min(1.0, MAX_OUT_W / out_w, MAX_OUT_H / out_h)
-    vid_w = int(out_w * scale_factor)
-    vid_h = int(out_h * scale_factor)
-    vid_w = vid_w if vid_w % 2 == 0 else vid_w - 1
-    vid_h = vid_h if vid_h % 2 == 0 else vid_h - 1
+    output_writer = None
+    output_path = None
+    scale_factor = 1.0
+    vid_w, vid_h = out_w, out_h
 
-    output_filename = f"{uuid.uuid4()}_annotated.mp4"
-    user_outputs_dir = os.path.join(ADVANCED_OUTPUTS_DIR, user_id_str) if user_id_str else ADVANCED_OUTPUTS_DIR
-    os.makedirs(user_outputs_dir, exist_ok=True)
-    output_path = os.path.join(user_outputs_dir, output_filename)
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    output_writer = cv2.VideoWriter(output_path, fourcc, processing_fps, (vid_w, vid_h))
+    if generate_video:
+        MAX_OUT_W, MAX_OUT_H = 1280, 720
+        scale_factor = min(1.0, MAX_OUT_W / out_w, MAX_OUT_H / out_h)
+        vid_w = int(out_w * scale_factor)
+        vid_h = int(out_h * scale_factor)
+        vid_w = vid_w if vid_w % 2 == 0 else vid_w - 1
+        vid_h = vid_h if vid_h % 2 == 0 else vid_h - 1
+
+        output_filename = f"{uuid.uuid4()}_annotated.mp4"
+        user_outputs_dir = os.path.join(ADVANCED_OUTPUTS_DIR, user_id_str) if user_id_str else ADVANCED_OUTPUTS_DIR
+        os.makedirs(user_outputs_dir, exist_ok=True)
+        output_path = os.path.join(user_outputs_dir, output_filename)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        output_writer = cv2.VideoWriter(output_path, fourcc, processing_fps, (vid_w, vid_h))
+    else:
+        logger.info(f"⚡ [Session {session.id}] FAST METADATA-ONLY PIPELINE ACTIVE: Skipping video generation & rendering overlays.")
 
     tracker = sv.ByteTrack(frame_rate=int(processing_fps), lost_track_buffer=int(processing_fps * 8))
     line_counter = None
@@ -350,12 +386,12 @@ async def _process_video_job(
         # Clear, informative per-frame logging
         if current_occupancy > 0:
             logger.info(
-                f"{CLR_YG}🔍 [Frame {raw_frame_idx}/{total_frames} | {timestamp_sec:.1f}s | {progress}%] "
+                f"{CLR_YG}🔍 [{model_scale_tag}] [Frame {raw_frame_idx}/{total_frames} | {timestamp_sec:.1f}s | {progress}%] "
                 f"PROCESSED -> People: {current_occupancy} | Active Tracks: {len(active_tracks)}{CLR_RST}"
             )
         elif processed_frame_idx % 10 == 0:
             logger.info(
-                f"{CLR_DIM}⏳ [Frame {raw_frame_idx}/{total_frames} | {timestamp_sec:.1f}s | {progress}%] "
+                f"{CLR_DIM}⏳ [{model_scale_tag}] [Frame {raw_frame_idx}/{total_frames} | {timestamp_sec:.1f}s | {progress}%] "
                 f"Scanning frame (0 people present){CLR_RST}"
             )
 
@@ -418,12 +454,15 @@ async def _process_video_job(
                 track_info = active_tracks[tracker_id]
                 track_info["last_seen"] = timestamp_sec
 
-                # SMART FACE & REID EXTRACTION (Skip if face already confirmed, or if too small/distant)
-                is_close_enough_for_face = bbox_height >= 85
+                # SMART FACE & REID EXTRACTION (Sample face until confirmed or max attempts reached)
+                is_close_enough_for_face = bbox_height >= 45
+                max_face_shots = int(os.getenv("FEATURE_LOCK_SHOTS", getattr(settings, "FEATURE_LOCK_SHOTS", 6)))
+                face_shots = track_info.get("face_shots_count", 0)
                 should_check_face = (
                     not track_info["face_confirmed"] and
+                    face_shots < max_face_shots and
                     is_close_enough_for_face and
-                    (processed_frame_idx % 3 == 0) # Sample face every ~0.6s
+                    (processed_frame_idx % 2 == 0 or face_shots == 0)
                 )
                 should_extract_reid = (
                     track_info["reid_embedding"] is None and
@@ -443,16 +482,16 @@ async def _process_video_job(
                     faces = []
                     face_crop = None
                     if should_check_face:
-                        face_crop = extract_head_crop_from_mask(frame, person_mask, x1, y1, x2, y2, head_fraction=0.30)
+                        face_crop = extract_head_crop_from_mask(frame, person_mask, x1, y1, x2, y2, head_fraction=0.45)
                         if face_crop is not None and face_crop.size > 0:
-                            _, encoded_crop = cv2.imencode(".jpg", face_crop)
                             try:
-                                faces = face_rec_service.extract_faces(encoded_crop.tobytes())
+                                # Direct zero-copy NumPy array inference
+                                faces = face_rec_service.extract_faces_from_image(face_crop)
                             except Exception:
                                 faces = []
 
-                    min_face_size = int(os.getenv("ADVANCED_FACE_MIN_SIZE", getattr(settings, "ADVANCED_FACE_MIN_SIZE", 35)))
-                    min_face_det_score = float(os.getenv("ADVANCED_FACE_MIN_DET_SCORE", getattr(settings, "ADVANCED_FACE_MIN_DET_SCORE", 0.60)))
+                    min_face_size = int(os.getenv("ADVANCED_FACE_MIN_SIZE", getattr(settings, "ADVANCED_FACE_MIN_SIZE", 14)))
+                    min_face_det_score = float(os.getenv("ADVANCED_FACE_MIN_DET_SCORE", getattr(settings, "ADVANCED_FACE_MIN_DET_SCORE", 0.35)))
 
                     valid_faces = []
                     for face in faces:
@@ -465,6 +504,7 @@ async def _process_video_job(
                     if valid_faces:
                         matched_face = max(valid_faces, key=lambda f: (f["bbox"][2] - f["bbox"][0]) * (f["bbox"][3] - f["bbox"][1]))
                         face_embedding = np.array(matched_face["embedding"], dtype=np.float32)
+                        track_info["face_shots_count"] = face_shots + 1
                         try:
                             if face_crop is not None:
                                 crop_fname = f"advanced_{session.id}_{tracker_id}.jpg"
@@ -478,8 +518,21 @@ async def _process_video_job(
 
                     # PHASE 1: Face Recognition against Employee Cache
                     match_emp = None
+                    best_cand_emp = None
+                    best_cand_sim = -1.0
                     if track_employees and employee_cache and face_embedding is not None:
                         match_emp = find_best_match_in_cache(face_embedding, employee_cache, FACE_SIMILARITY_THRESHOLD)
+                        if not match_emp:
+                            # Calculate top candidate for live diagnostic visibility
+                            t_norm = np.linalg.norm(face_embedding)
+                            t_normed = face_embedding / t_norm if t_norm > 0 else face_embedding
+                            for emp, ref_emb in employee_cache:
+                                r_norm = np.linalg.norm(ref_emb)
+                                r_normed = ref_emb / r_norm if r_norm > 0 else ref_emb
+                                sim_val = float(np.dot(t_normed, r_normed))
+                                if sim_val > best_cand_sim:
+                                    best_cand_sim = sim_val
+                                    best_cand_emp = emp
 
                     if match_emp:
                         employee, sim = match_emp
@@ -526,9 +579,14 @@ async def _process_video_job(
                                     is_active=True,
                                     face_anchored=True
                                 )
+                    elif best_cand_emp is not None and best_cand_sim > 0.15:
+                        logger.info(
+                            f"  🔍 [Track #{tracker_id}] Face scanned -> Closest Match: {best_cand_emp.first_name} {best_cand_emp.last_name} "
+                            f"({best_cand_sim*100:.1f}%) | Required Threshold: {FACE_SIMILARITY_THRESHOLD*100:.1f}%"
+                        )
 
                     # PHASE 2: If no face matched or face is not visible, check Full-Body ReID Appearance in memory (0ms)
-                    elif track_info["reid_embedding"] and not track_info["face_confirmed"]:
+                    if track_info["reid_embedding"] and not track_info["face_confirmed"]:
                         match_vis = None
                         if track_repeat_visitors and session_reid_cache:
                             t_vec = np.array(track_info["reid_embedding"], dtype=np.float32)
@@ -642,64 +700,68 @@ async def _process_video_job(
                     elif not is_inside and zone.id in track_info["current_zones"]:
                         track_info["current_zones"].remove(zone.id)
 
-                # --- DRAW OVERLAYS FOR THIS TRACKED PERSON ---
-                if track_info["person_type"] == "employee":
-                    color = (0, 255, 0) # Green for Employee
-                    emp_name = track_info.get("employee_name", "Employee")
-                    emp_code = track_info.get("employee_code", "")
-                    sim_pct = int(track_info["identity_confidence"] * 100)
-                    code_str = f" [{emp_code}]" if emp_code else ""
-                    source_str = " (ReID)" if track_info.get("identity_source") == "reid" else ""
-                    label = f"#{tracker_id} | {emp_name}{code_str}{source_str} ({sim_pct}%)"
-                elif track_info.get("visitor_name"):
-                    color = (255, 215, 0) # Cyan for Named Visitor
-                    v_name = track_info["visitor_name"]
-                    sim_pct = int(track_info["identity_confidence"] * 100)
-                    label = f"#{tracker_id} | {v_name} ({sim_pct}%)"
-                elif track_info["identity_source"] == "reid":
-                    color = (255, 215, 0) # Cyan for ReID matched Visitor
-                    label = f"#{tracker_id} | Vis ReID ({int(track_info['identity_confidence']*100)}%)"
-                else:
-                    color = (0, 165, 255) # Orange for Visitor
-                    label = f"#{tracker_id} | Visitor"
+                # --- DRAW OVERLAYS FOR THIS TRACKED PERSON (ONLY IF VIDEO GENERATION REQUESTED) ---
+                if generate_video:
+                    if track_info["person_type"] == "employee":
+                        color = (0, 255, 0) # Green for Employee
+                        emp_name = track_info.get("employee_name", "Employee")
+                        emp_code = track_info.get("employee_code", "")
+                        sim_pct = int(track_info["identity_confidence"] * 100)
+                        code_str = f" [{emp_code}]" if emp_code else ""
+                        source_str = " (ReID)" if track_info.get("identity_source") == "reid" else ""
+                        label = f"#{tracker_id} | {emp_name}{code_str}{source_str} ({sim_pct}%)"
+                    elif track_info.get("visitor_name"):
+                        color = (255, 215, 0) # Cyan for Named Visitor
+                        v_name = track_info["visitor_name"]
+                        sim_pct = int(track_info["identity_confidence"] * 100)
+                        label = f"#{tracker_id} | {v_name} ({sim_pct}%)"
+                    elif track_info["identity_source"] == "reid":
+                        color = (255, 215, 0) # Cyan for ReID matched Visitor
+                        label = f"#{tracker_id} | Vis ReID ({int(track_info['identity_confidence']*100)}%)"
+                    else:
+                        color = (0, 165, 255) # Orange for Visitor
+                        label = f"#{tracker_id} | Visitor"
 
-                # Draw Bounding Box & Centroid
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.circle(frame, (int(center_x), int(center_y)), 4, color, -1)
+                    # Draw Bounding Box & Centroid
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.circle(frame, (int(center_x), int(center_y)), 4, color, -1)
 
-                # Label text background box
-                (w_lbl, h_lbl), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
-                cv2.rectangle(frame, (x1, max(0, y1 - h_lbl - 8)), (x1 + w_lbl + 6, max(h_lbl, y1)), color, -1)
-                cv2.putText(frame, label, (x1 + 3, max(h_lbl - 2, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                    # Label text background box
+                    (w_lbl, h_lbl), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+                    cv2.rectangle(frame, (x1, max(0, y1 - h_lbl - 8)), (x1 + w_lbl + 6, max(h_lbl, y1)), color, -1)
+                    cv2.putText(frame, label, (x1 + 3, max(h_lbl - 2, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
 
-        # --- DRAW VIRTUAL GATE LINE VECTOR OVERLAY ---
-        if line_counter:
-            p1 = (int(line_counter.start_point[0]), int(line_counter.start_point[1]))
-            p2 = (int(line_counter.end_point[0]), int(line_counter.end_point[1]))
-            cv2.line(frame, p1, p2, (255, 255, 0), 3) # Yellow-Cyan Gate Line
-            cv2.circle(frame, p1, 6, (0, 255, 0), -1) # Start (Green dot)
-            cv2.circle(frame, p2, 6, (0, 0, 255), -1) # End (Red dot)
+        if generate_video:
+            # --- DRAW VIRTUAL GATE LINE VECTOR OVERLAY ---
+            if line_counter:
+                p1 = (int(line_counter.start_point[0]), int(line_counter.start_point[1]))
+                p2 = (int(line_counter.end_point[0]), int(line_counter.end_point[1]))
+                cv2.line(frame, p1, p2, (255, 255, 0), 3) # Yellow-Cyan Gate Line
+                cv2.circle(frame, p1, 6, (0, 255, 0), -1) # Start (Green dot)
+                cv2.circle(frame, p2, 6, (0, 0, 255), -1) # End (Red dot)
 
-        # --- DRAW HUD SUMMARY BOX ---
-        if track_occupancy or line_crossing_analysis:
-            hud_w, hud_h = 340, 100
-            if out_w > hud_w + 20 and out_h > hud_h + 20:
-                sub = frame[10:10+hud_h, 10:10+hud_w]
-                bg = np.zeros(sub.shape, dtype=np.uint8) + 15
-                frame[10:10+hud_h, 10:10+hud_w] = cv2.addWeighted(sub, 0.3, bg, 0.7, 0)
-                
-                in_cnt = line_counter.in_count if line_counter else 0
-                out_cnt = line_counter.out_count if line_counter else 0
-                
-                cv2.putText(frame, "ADVANCED PEOPLE & SPATIAL ANALYTICS", (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-                cv2.putText(frame, f"Occupancy: {current_occupancy}  |  Peak: {peak_occupancy_so_far}", (20, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
-                cv2.putText(frame, f"Gate Line  --> IN: {in_cnt}   <-- OUT: {out_cnt}", (20, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+            # --- DRAW HUD SUMMARY BOX ---
+            if track_occupancy or line_crossing_analysis:
+                hud_w, hud_h = 340, 100
+                if out_w > hud_w + 20 and out_h > hud_h + 20:
+                    sub = frame[10:10+hud_h, 10:10+hud_w]
+                    bg = np.zeros(sub.shape, dtype=np.uint8) + 15
+                    frame[10:10+hud_h, 10:10+hud_w] = cv2.addWeighted(sub, 0.3, bg, 0.7, 0)
+                    
+                    in_cnt = line_counter.in_count if line_counter else 0
+                    out_cnt = line_counter.out_count if line_counter else 0
+                    
+                    cv2.putText(frame, "ADVANCED PEOPLE & SPATIAL ANALYTICS", (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                    cv2.putText(frame, f"Occupancy: {current_occupancy}  |  Peak: {peak_occupancy_so_far}", (20, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+                    cv2.putText(frame, f"Gate Line  --> IN: {in_cnt}   <-- OUT: {out_cnt}", (20, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
 
-        out_frame = cv2.resize(frame, (vid_w, vid_h)) if scale_factor < 1.0 else frame
-        output_writer.write(out_frame)
+            if output_writer is not None:
+                out_frame = cv2.resize(frame, (vid_w, vid_h)) if scale_factor < 1.0 else frame
+                output_writer.write(out_frame)
 
     cap.release()
-    output_writer.release()
+    if output_writer is not None:
+        output_writer.release()
 
     # Create PersonTimelineEvent records and Employee Attendance logs at track completion
     from modules.employees.repository import EmployeeRepository
@@ -766,15 +828,16 @@ async def _process_video_job(
             except Exception as e:
                 logger.warning(f"Failed to log employee attendance: {e}")
 
-    # Transcode output video to browser-compatible H.264 format using shared video utility
-    try:
-        from shared.utils.video_format import videoFormatChanger
-        videoFormatChanger(output_path, formats="h264", overwrite_input=True)
-    except Exception as e:
-        print(f"Video transcoding failed: {e}")
+    # Transcode and upload output video if video generation was requested
+    if generate_video and output_path and os.path.exists(output_path):
+        try:
+            from shared.utils.video_format import videoFormatChanger
+            videoFormatChanger(output_path, formats="h264", overwrite_input=True)
+        except Exception as e:
+            print(f"Video transcoding failed: {e}")
 
-    from services.storage import storage_client
-    storage_client.upload_file(output_path, output_path)
+        from services.storage import storage_client
+        storage_client.upload_file(output_path, output_path)
 
     avg_occ = float(np.mean([item["occupancy"] for item in occupancy_history])) if occupancy_history else 0.0
     total_person_count = len(active_tracks)
@@ -799,7 +862,7 @@ async def _process_video_job(
         employee_count=emp_count,
         visitor_count=vis_count,
         occupancy_timeline=occupancy_history if track_occupancy else None,
-        output_video_path=output_path
+        output_video_path=output_path if generate_video else None
     )
     await db.commit()
 

@@ -49,6 +49,7 @@ class AdvancedPeopleAnalyticsSession(BaseModel):
     track_repeat_visitors: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     line_crossing_analysis: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     track_occupancy: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    generate_video: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     
     # Results
     unique_person_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

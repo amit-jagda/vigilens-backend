@@ -152,6 +152,17 @@ async def startup_event():
     from database.redis import init_redis
     await init_redis()
 
+    # Ensure database columns are up-to-date
+    from database.session import engine
+    from sqlalchemy import text
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("ALTER TABLE advanced_people_analytics_sessions ADD COLUMN IF NOT EXISTS generate_video BOOLEAN DEFAULT FALSE;")
+            )
+    except Exception as e:
+        print(f"Startup DB column sync warning: {e}")
+
     import asyncio
     from modules.peoplefind.service import PeopleFindService
     asyncio.create_task(PeopleFindService.migrate_existing_heic())

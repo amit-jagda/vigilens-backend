@@ -49,11 +49,11 @@ def group_timestamps(seconds_list: list, max_gap: float) -> list:
 
 def map_similarity_threshold(threshold: float) -> float:
     """
-    Maps similarity thresholds from the ReID range [0.70, 1.0] to face recognition [0.35, 0.65].
+    Maps similarity thresholds from the ReID range [0.70, 1.0] to face recognition [0.28, 0.55].
     If the threshold is in the face recognition range (e.g. < 0.70), it is returned unchanged.
     """
     if threshold >= 0.70:
-        return 0.35 + (threshold - 0.70) * 1.0
+        return 0.28 + (threshold - 0.70) * 0.7
     return threshold
 
 

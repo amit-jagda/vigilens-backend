@@ -217,38 +217,48 @@ def extract_head_crop_from_mask(
     frame: np.ndarray,
     mask: np.ndarray | None,
     x1: int, y1: int, x2: int, y2: int,
-    head_fraction: float = 0.30
+    head_fraction: float = 0.45
 ) -> np.ndarray:
     """
-    Extracts the head/face region from the top `head_fraction` of the
-    segmentation mask bounding box. Used for face recognition crop
-    instead of the padded full-body crop.
-
-    Falls back to padded bounding box if mask unavailable.
+    Extracts the head/upper-body region (top ~45% of person bounding box) with contextual padding.
+    Preserves natural RGB image context and automatically upscales small patches so InsightFace
+    (SCRFD detector + ArcFace recognition) can accurately detect facial landmarks without clipping.
     """
-    h = y2 - y1
-    w = x2 - x1
+    fh, fw = frame.shape[:2]
+    h = max(1, y2 - y1)
+    w = max(1, x2 - x1)
 
-    if mask is None:
-        # Fallback: top 30% of bounding box with 10% padding
-        pad_y = int(h * 0.10)
-        pad_x = int(w * 0.10)
-        fh, fw = frame.shape[:2]
-        hy1 = max(0, y1 - pad_y)
-        hy2 = min(fh, y1 + int(h * head_fraction) + pad_y)
-        hx1 = max(0, x1 - pad_x)
-        hx2 = min(fw, x2 + pad_x)
-        return frame[hy1:hy2, hx1:hx2].copy()
+    y1_actual = y1
+    if mask is not None:
+        person_mask = mask[y1:y2, x1:x2]
+        rows_with_person = np.any(person_mask, axis=1)
+        if np.any(rows_with_person):
+            top_offset = int(np.argmax(rows_with_person))
+            if top_offset < int(h * 0.20):
+                y1_actual = y1 + top_offset
 
-    # Use mask: find topmost pixel rows with person pixels
-    person_mask = mask[y1:y2, x1:x2]
-    head_h = max(int(h * head_fraction), 60)  # minimum 60px head region
+    # Top ~45% of person height with minimum 75px height for reliable face detection
+    head_h = max(int(h * head_fraction), 75)
+    
+    pad_y = int(head_h * 0.12)
+    pad_x = int(w * 0.20)
 
-    head_crop = frame[y1:min(y2, y1 + head_h), x1:x2].copy()
-    head_mask = person_mask[:head_crop.shape[0], :]
+    hy1 = max(0, y1_actual - pad_y)
+    hy2 = min(fh, y1_actual + head_h + pad_y)
+    hx1 = max(0, x1 - pad_x)
+    hx2 = min(fw, x2 + pad_x)
 
-    if head_mask.shape[:2] == head_crop.shape[:2]:
-        head_crop[~head_mask] = 0  # zero background in head region too
+    crop = frame[hy1:hy2, hx1:hx2].copy()
+    if crop is None or crop.size == 0:
+        return crop
 
-    return head_crop
+    # Auto-upscale small crops to at least 180px so SCRFD detects distant/angled faces easily
+    ch, cw = crop.shape[:2]
+    if cw < 180 or ch < 180:
+        scale = max(180.0 / max(cw, 1), 180.0 / max(ch, 1))
+        scale = min(scale, 3.0)
+        new_w, new_h = int(cw * scale), int(ch * scale)
+        crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+    return crop
 

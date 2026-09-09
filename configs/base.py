@@ -68,12 +68,15 @@ class Settings(BaseSettings):
 
     # Advanced People Analytics Configuration
     PROCESS_EVERY_FRAME: bool = False  # Set to True to analyze 100% of video frames (native FPS) without skipping
-    PROCESSING_FPS: float = 5.0  # Analyzed frames per second when PROCESS_EVERY_FRAME is False
-    ADVANCED_FACE_SIMILARITY_THRESHOLD: float = 0.45
-    ADVANCED_REID_SIMILARITY_THRESHOLD: float = 0.80
-    ADVANCED_FACE_MIN_SIZE: int = 35
-    ADVANCED_FACE_MIN_DET_SCORE: float = 0.60
+    PROCESSING_FPS: float = 7.5  # Analyzed frames per second when PROCESS_EVERY_FRAME is False (7.5 FPS optimal for 15 FPS native CCTV)
+    ADVANCED_FACE_SIMILARITY_THRESHOLD: float = 0.28
+    ADVANCED_REID_SIMILARITY_THRESHOLD: float = 0.75
+    ADVANCED_FACE_MIN_SIZE: int = 14
+    ADVANCED_FACE_MIN_DET_SCORE: float = 0.35
     ADVANCED_CROSS_CAMERA_MIN_SCORE: float = 0.65
+    FEATURE_LOCK_SHOTS: int = 6  # Allow up to 6 face sampling attempts per person
+    REID_MEMORY_BANK_TTL_SEC: float = 45.0  # Time window to stitch lost tracks on occlusions
+    REID_MEMORY_BANK_SIMILARITY_THRESHOLD: float = 0.75
     
     model_config = SettingsConfigDict(
         env_file=".env",
