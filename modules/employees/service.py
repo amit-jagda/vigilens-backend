@@ -120,6 +120,33 @@ class EmployeeService:
                 storage_client.delete_file(employee.photo_path)
             except Exception:
                 pass
+
+        # Cascade soft-delete to AdvancedPeopleAnalytics identities & embeddings
+        try:
+            from application.advancedpeopleanalytics.model import AdvancedPersonIdentity, AdvancedPersonEmbedding
+            from sqlalchemy import update, select
+            
+            ident_res = await self.db.execute(
+                select(AdvancedPersonIdentity.id).where(
+                    AdvancedPersonIdentity.tenant_id == tenant_id,
+                    AdvancedPersonIdentity.employee_id == employee_id
+                )
+            )
+            ident_ids = ident_res.scalars().all()
+            if ident_ids:
+                await self.db.execute(
+                    update(AdvancedPersonIdentity)
+                    .where(AdvancedPersonIdentity.id.in_(ident_ids))
+                    .values(is_delete=True, is_active=False, is_employee=False)
+                )
+                await self.db.execute(
+                    update(AdvancedPersonEmbedding)
+                    .where(AdvancedPersonEmbedding.identity_id.in_(ident_ids))
+                    .values(is_delete=True, is_active=False)
+                )
+        except Exception as e:
+            pass
+
         await self.db.commit()
         await invalidate_employee_embeddings_cache(tenant_id)
 

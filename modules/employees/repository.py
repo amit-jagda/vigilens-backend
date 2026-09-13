@@ -29,7 +29,7 @@ class EmployeeRepository:
         return employee
 
     async def get_employee_by_id(self, employee_id: uuid.UUID, tenant_id: uuid.UUID) -> Optional[Employee]:
-        stmt = select(Employee).where(
+        stmt = select(Employee).options(selectinload(Employee.embeddings)).where(
             Employee.id == employee_id,
             Employee.tenant_id == tenant_id,
             Employee.is_delete == False
@@ -73,6 +73,40 @@ class EmployeeRepository:
             embedding=embedding,
             bbox=bbox
         )
+        self.db.add(ee)
+        await self.db.flush()
+        return ee
+
+    async def add_employee_face_exemplar(
+        self, employee_id: uuid.UUID, embedding: list[float], max_exemplars: int = 6
+    ) -> Optional[EmployeeEmbedding]:
+        stmt = select(EmployeeEmbedding).where(
+            EmployeeEmbedding.employee_id == employee_id,
+            EmployeeEmbedding.is_delete == False
+        )
+        res = await self.db.execute(stmt)
+        existing = list(res.scalars().all())
+
+        import numpy as np
+        new_v = np.array(embedding, dtype=np.float32)
+        new_norm = np.linalg.norm(new_v)
+        if new_norm > 0:
+            new_u = new_v / new_norm
+            for e in existing:
+                e_v = np.array(e.embedding, dtype=np.float32)
+                e_norm = np.linalg.norm(e_v)
+                if e_norm > 0:
+                    sim = float(np.dot(new_u, e_v / e_norm))
+                    if sim > 0.92:
+                        return e
+
+        if len(existing) >= max_exemplars:
+            oldest = existing[1] if len(existing) > 1 else existing[0]
+            oldest.embedding = embedding
+            await self.db.flush()
+            return oldest
+
+        ee = EmployeeEmbedding(employee_id=employee_id, embedding=embedding)
         self.db.add(ee)
         await self.db.flush()
         return ee

@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from pgvector.sqlalchemy import Vector
 
 from database.base import BaseModel
+from modules.gallery.model import GalleryMedia
 
 class AdvancedUploadedVideo(BaseModel):
     """
@@ -34,6 +35,9 @@ class AdvancedPeopleAnalyticsSession(BaseModel):
     session_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     
     camera_node_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("camera_nodes.id", ondelete="SET NULL"), nullable=True)
+    gallery_media_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("gallery_media.id", ondelete="SET NULL"), nullable=True
+    )
     recording_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     
     # Coordinates of counting line
@@ -51,6 +55,10 @@ class AdvancedPeopleAnalyticsSession(BaseModel):
     track_occupancy: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     generate_video: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     
+    # Time Range / Sub-Clip Processing (seconds)
+    start_time_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    end_time_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    
     # Results
     unique_person_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_person_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -67,6 +75,7 @@ class AdvancedPeopleAnalyticsSession(BaseModel):
 
     # Relationships
     camera_node: Mapped[Optional["CameraNode"]] = relationship(back_populates="sessions")
+    gallery_media: Mapped[Optional["GalleryMedia"]] = relationship()
     employee_attendance: Mapped[list["AdvancedEmployeeAttendanceLog"]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
@@ -390,6 +399,8 @@ class PersonTimelineEvent(BaseModel):
     identity_source: Mapped[str] = mapped_column(String(50), nullable=False) # 'face' | 'reid' | 'face+reid' | 'tracking'
     identity_confidence: Mapped[float] = mapped_column(Float, default=1.0)
     tracker_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    entry_crop_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    exit_crop_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     @property
     def duration_seconds(self) -> float:

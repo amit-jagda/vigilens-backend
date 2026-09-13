@@ -18,6 +18,7 @@ from modules.activity.routes import router as activity_router
 from modules.smokingdetect.routes import router as smokingdetect_router
 from modules.gallery.routes import router as gallery_router
 from application.advancedpeopleanalytics.routes import router as advancedpeopleanalytics_router
+from application.sql_agent.routes import router as assistant_router
 
 
 from fastapi.staticfiles import StaticFiles
@@ -145,6 +146,7 @@ app.include_router(activity_router, prefix=settings.API_V1_STR)
 app.include_router(smokingdetect_router, prefix=settings.API_V1_STR)
 app.include_router(gallery_router, prefix=settings.API_V1_STR)
 app.include_router(advancedpeopleanalytics_router, prefix=settings.API_V1_STR)
+app.include_router(assistant_router, prefix=settings.API_V1_STR)
 
 
 @app.on_event("startup")

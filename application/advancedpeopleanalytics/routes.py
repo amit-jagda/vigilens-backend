@@ -1,9 +1,9 @@
 import uuid
 import datetime
 import os
-from typing import List, Optional
-from fastapi import APIRouter, Depends, status, HTTPException, Query, File, UploadFile, Form
-from fastapi.responses import FileResponse
+from typing import List, Optional, Union
+from fastapi import APIRouter, Depends, status, HTTPException, Query, File, UploadFile, Form, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.session import get_db
@@ -12,6 +12,7 @@ from shared.dependencies.auth import require_admin, require_viewer
 from modules.users.model import User
 from application.advancedpeopleanalytics.service import AdvancedPeopleAnalyticsService
 from application.advancedpeopleanalytics.schema import (
+    AdvancedVideoProcessItem,
     ProcessAdvancedVideosRequest,
     AdvancedPeopleAnalyticsSessionResponse,
     SessionDetectedPerson,
@@ -29,7 +30,15 @@ from application.advancedpeopleanalytics.schema import (
     CameraZoneLinkResponse,
     PersonTimelineResponse,
     PersonSummaryItem,
-    AssociationRequest
+    AssociationRequest,
+    CreateSubclipRequest,
+    SubclipResponse,
+    PersonDwellByPhotoResponse,
+    DailyCheckinResponse,
+    HourlyDwellResponse,
+    ReviewQueueCandidate,
+    ReconcileIdentityRequest,
+    PhotoSearchResponse
 )
 
 router = APIRouter(prefix="/advancedpeopleanalytics", tags=["Advanced People Analytics Suite"])
@@ -388,7 +397,10 @@ async def register_or_update_visitor(
         first_name=data.first_name,
         last_name=data.last_name,
         registration_type=data.registration_type,
-        employee_code=data.employee_code
+        employee_code=data.employee_code,
+        existing_employee_id=data.existing_employee_id,
+        retroactive_attendance=data.retroactive_attendance,
+        force=data.force
     )
     return StandardResponse(
         message=result["message"],
@@ -437,6 +449,32 @@ async def add_person_from_face_photo(
     )
 
 
+@router.delete(
+    "/visitors/{identity_id}",
+    response_model=StandardResponse[dict],
+    status_code=status.HTTP_200_OK
+)
+async def delete_visitor_identity(
+    identity_id: uuid.UUID,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Soft-delete a visitor identity profile and its associated occurrences, embeddings, and timeline events.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    result = await service.delete_visitor_identity(
+        tenant_id=tenant_id,
+        identity_id=identity_id
+    )
+    return StandardResponse(
+        message=result["message"],
+        status=status.HTTP_200_OK,
+        data=result
+    )
+
+
 # ==========================================
 # ANALYTICS SESSION MANAGEMENT
 # ==========================================
@@ -447,25 +485,33 @@ async def add_person_from_face_photo(
     status_code=status.HTTP_202_ACCEPTED
 )
 async def process_batch_sessions(
-    request: ProcessAdvancedVideosRequest,
+    request: Union[ProcessAdvancedVideosRequest, List[AdvancedVideoProcessItem]],
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db)
 ):
     tenant_id = verify_tenant(current_user)
     service = AdvancedPeopleAnalyticsService(db)
+
+    if isinstance(request, list):
+        req_obj = ProcessAdvancedVideosRequest(videos=request)
+    else:
+        req_obj = request
+
     sessions = await service.create_and_start_sessions(
         tenant_id=tenant_id,
-        videos=request.videos,
-        global_line_start=request.line_start,
-        global_line_end=request.line_end,
-        global_similarity_threshold=request.similarity_threshold,
-        global_confidence_threshold=request.confidence_threshold,
-        global_track_employees=request.track_employees,
-        global_register_new_visitors=request.register_new_visitors,
-        global_track_repeat_visitors=request.track_repeat_visitors,
-        global_line_crossing_analysis=request.line_crossing_analysis,
-        global_track_occupancy=request.track_occupancy,
-        global_generate_video=request.generate_video,
+        videos=req_obj.videos,
+        global_line_start=req_obj.line_start,
+        global_line_end=req_obj.line_end,
+        global_similarity_threshold=req_obj.similarity_threshold,
+        global_confidence_threshold=req_obj.confidence_threshold,
+        global_track_employees=req_obj.track_employees,
+        global_register_new_visitors=req_obj.register_new_visitors,
+        global_track_repeat_visitors=req_obj.track_repeat_visitors,
+        global_line_crossing_analysis=req_obj.line_crossing_analysis,
+        global_track_occupancy=req_obj.track_occupancy,
+        global_generate_video=req_obj.generate_video,
+        global_start_time=req_obj.start_time,
+        global_end_time=req_obj.end_time,
         user_id=current_user.id
     )
     return StandardResponse(
@@ -534,12 +580,79 @@ async def get_session_detected_people(
     )
 
 
+def stream_video_file_with_range(request: Request, file_path: str, media_type: str = "video/mp4", filename: str = "video.mp4"):
+    file_size = os.path.getsize(file_path)
+    range_header = request.headers.get("range")
+
+    if not range_header:
+        def full_iter(chunk_size: int = 1024 * 1024):
+            with open(file_path, "rb") as f:
+                while chunk := f.read(chunk_size):
+                    yield chunk
+
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+            "Content-Type": media_type,
+            "Content-Disposition": f"inline; filename={filename}",
+        }
+        return StreamingResponse(full_iter(), status_code=200, headers=headers)
+
+    range_val = range_header.strip()
+    if range_val.startswith("bytes="):
+        range_val = range_val[6:]
+    
+    parts = range_val.split("-")
+    start_str = parts[0].strip() if len(parts) > 0 else ""
+    end_str = parts[1].strip() if len(parts) > 1 else ""
+
+    if start_str and end_str:
+        start = int(start_str)
+        end = int(end_str)
+    elif start_str:
+        start = int(start_str)
+        end = file_size - 1
+    elif end_str:
+        start = max(0, file_size - int(end_str))
+        end = file_size - 1
+    else:
+        start = 0
+        end = file_size - 1
+
+    start = max(0, min(start, file_size - 1))
+    end = max(start, min(end, file_size - 1))
+    content_length = (end - start) + 1
+
+    def range_iter(start_pos: int, length: int, chunk_size: int = 1024 * 512):
+        with open(file_path, "rb") as f:
+            f.seek(start_pos)
+            remaining = length
+            while remaining > 0:
+                read_amount = min(remaining, chunk_size)
+                data = f.read(read_amount)
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+
+    headers = {
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(content_length),
+        "Content-Type": media_type,
+        "Content-Disposition": f"inline; filename={filename}",
+    }
+    return StreamingResponse(range_iter(start, content_length), status_code=206, headers=headers)
+
+
 @router.get(
     "/sessions/{session_id}/video",
     status_code=status.HTTP_200_OK
 )
 async def stream_annotated_video(
     session_id: uuid.UUID,
+    request: Request,
+    token: Optional[str] = Query(None),
     current_user: User = Depends(require_viewer),
     db: AsyncSession = Depends(get_db)
 ):
@@ -563,8 +676,16 @@ async def stream_annotated_video(
     file_ext = os.path.splitext(target_video_path)[1].lower()
     media_type = "image/jpeg" if file_ext in (".jpg", ".jpeg") else "video/mp4"
 
-    return FileResponse(
-        path=target_video_path,
+    if media_type == "image/jpeg":
+        return FileResponse(
+            path=target_video_path,
+            media_type=media_type,
+            filename=f"{session_id}{file_ext}"
+        )
+
+    return stream_video_file_with_range(
+        request=request,
+        file_path=target_video_path,
         media_type=media_type,
         filename=f"{session_id}{file_ext}"
     )
@@ -610,4 +731,257 @@ async def delete_analytics_session(
         message="Analytics session and output video files deleted successfully.",
         status=status.HTTP_200_OK,
         data=None
+    )
+
+
+# ==========================================
+# GALLERY REUSE & SUBCLIP & PHOTO ANALYTICS
+# ==========================================
+
+@router.get(
+    "/gallery",
+    response_model=StandardResponse[List[dict]],
+    status_code=status.HTTP_200_OK
+)
+async def list_gallery_videos(
+    current_user: User = Depends(require_viewer),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    List available raw CCTV videos stored in the centralized gallery repository for the tenant.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    videos = await service.get_gallery_videos(tenant_id)
+    return StandardResponse(
+        message=f"Retrieved {len(videos)} gallery video(s).",
+        status=status.HTTP_200_OK,
+        data=videos
+    )
+
+
+@router.post(
+    "/sessions/subclip",
+    response_model=StandardResponse[SubclipResponse],
+    status_code=status.HTTP_201_CREATED
+)
+async def create_video_subclip(
+    data: CreateSubclipRequest,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Extract a sub-clip from an existing video/session/gallery media using 0-second FFmpeg stream copy.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    subclip = await service.create_subclip(tenant_id, data)
+    return StandardResponse(
+        message="Video sub-clip generated successfully.",
+        status=status.HTTP_201_CREATED,
+        data=subclip
+    )
+
+
+@router.post(
+    "/analytics/person-dwell-by-photo",
+    response_model=StandardResponse[PersonDwellByPhotoResponse],
+    status_code=status.HTTP_200_OK
+)
+async def get_person_dwell_by_photo(
+    file: UploadFile = File(...),
+    threshold: float = Query(0.35, ge=0.0, le=1.0, description="Cosine distance threshold (<=0.35 means >=65% similarity)"),
+    current_user: User = Depends(require_viewer),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Upload a face photo to query how much total and place-wise dwell time that person has spent.
+    """
+    tenant_id = verify_tenant(current_user)
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded face photo is empty."
+        )
+    service = AdvancedPeopleAnalyticsService(db)
+    result = await service.get_person_dwell_by_photo(tenant_id, contents, threshold=threshold)
+    return StandardResponse(
+        message="Person dwell analytics calculated successfully." if result.matched else "No matching face found in records.",
+        status=status.HTTP_200_OK,
+        data=result
+    )
+
+
+# ==========================================
+# SEARCH BY PHOTO / REFERENCE IMAGE (VECTOR DB)
+# ==========================================
+
+@router.post(
+    "/search/photo",
+    response_model=StandardResponse[PhotoSearchResponse],
+    status_code=status.HTTP_200_OK
+)
+async def search_by_photo(
+    file: UploadFile = File(..., description="Query photo (face portrait or full body image)"),
+    threshold: float = Query(0.55, ge=0.0, le=1.0, description="Similarity threshold for vector match"),
+    limit: int = Query(20, ge=1, le=100, description="Max matches to return"),
+    current_user: User = Depends(require_viewer),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Reverse searches vector DB using uploaded photo.
+    Extracts 512-dim Face embedding & 512-dim Body ReID embedding,
+    returns all matching people ranked by similarity with full timeline moments & seek timestamps.
+    """
+    tenant_id = verify_tenant(current_user)
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded query photo is empty."
+        )
+    service = AdvancedPeopleAnalyticsService(db)
+    result = await service.search_by_photo(
+        tenant_id=tenant_id,
+        image_bytes=contents,
+        similarity_threshold=threshold,
+        limit=limit
+    )
+    return StandardResponse(
+        message=f"Found {result.total_matches_found} matching identity/timeline appearance(s).",
+        status=status.HTTP_200_OK,
+        data=result
+    )
+
+
+# ==========================================
+# DAILY CHECK-IN BRIDGE (MORNING ANCHOR)
+# ==========================================
+
+@router.post(
+    "/employees/{employee_id}/daily-checkin",
+    response_model=StandardResponse[DailyCheckinResponse],
+    status_code=status.HTTP_200_OK
+)
+async def daily_employee_checkin(
+    employee_id: uuid.UUID,
+    face_image: UploadFile = File(..., description="Selfie, headshot, or portrait of employee (Required)"),
+    appearance_image: Optional[UploadFile] = File(None, description="Full-body outfit/clothing photo of employee today (Optional)"),
+    checkin_date: Optional[datetime.date] = Query(None, description="Date to anchor check-in to (defaults to today)"),
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Morning check-in anchor: registers clear face and daily outfit before CCTV footages are analyzed.
+    Flexible: Face image is required; Outfit is optional (or extracted from face_image if full-body).
+    """
+    tenant_id = verify_tenant(current_user)
+    face_bytes = await face_image.read()
+    if not face_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded face photo is empty."
+        )
+    appearance_bytes = await appearance_image.read() if appearance_image else None
+
+    service = AdvancedPeopleAnalyticsService(db)
+    res = await service.daily_employee_checkin(
+        tenant_id=tenant_id,
+        employee_id=employee_id,
+        face_bytes=face_bytes,
+        appearance_bytes=appearance_bytes,
+        checkin_date=checkin_date
+    )
+    return StandardResponse(
+        message=res.message,
+        status=status.HTTP_200_OK,
+        data=res
+    )
+
+
+# ==========================================
+# AREA-WISE HOURLY DWELL TIME ANALYTICS
+# ==========================================
+
+@router.get(
+    "/analytics/hourly-dwell",
+    response_model=StandardResponse[HourlyDwellResponse],
+    status_code=status.HTTP_200_OK
+)
+async def get_hourly_area_dwell(
+    target_date: Optional[datetime.date] = Query(None, description="Date to aggregate (defaults to today)"),
+    person_id: Optional[uuid.UUID] = Query(None, description="Filter for specific employee/visitor identity UUID"),
+    session_id: Optional[uuid.UUID] = Query(None, description="Filter for specific video session UUID"),
+    current_user: User = Depends(require_viewer),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Area-wise dwell time bar chart data hour-by-hour (00:00 to 23:00).
+    Max bar height represents 1 hour (3600 seconds / 60 minutes).
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    res = await service.get_hourly_area_dwell(
+        tenant_id=tenant_id,
+        target_date=target_date,
+        person_id=person_id,
+        session_id=session_id
+    )
+    return StandardResponse(
+        message="Hourly area dwell analytics retrieved successfully.",
+        status=status.HTTP_200_OK,
+        data=res
+    )
+
+
+# ==========================================
+# REVIEW QUEUE & CASCADING RECONCILIATION
+# ==========================================
+
+@router.get(
+    "/review-queue",
+    response_model=StandardResponse[List[ReviewQueueCandidate]],
+    status_code=status.HTTP_200_OK
+)
+async def get_review_queue(
+    target_date: Optional[datetime.date] = Query(None, description="Date to review (defaults to today)"),
+    current_user: User = Depends(require_viewer),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Lists unconfirmed visitor identities with recurring camera appearances and suggested employee matches.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    items = await service.get_review_queue(tenant_id, target_date=target_date)
+    return StandardResponse(
+        message=f"Retrieved {len(items)} candidate(s) awaiting review.",
+        status=status.HTTP_200_OK,
+        data=items
+    )
+
+
+@router.post(
+    "/identities/{identity_id}/reconcile",
+    response_model=StandardResponse[dict],
+    status_code=status.HTTP_200_OK
+)
+async def reconcile_identity(
+    identity_id: uuid.UUID,
+    data: ReconcileIdentityRequest,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Assigns an unconfirmed visitor identity to an employee or named visitor,
+    and automatically cascades the match to merge related cards across cameras.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    res = await service.reconcile_identity(tenant_id, identity_id, data)
+    return StandardResponse(
+        message=res["message"],
+        status=status.HTTP_200_OK,
+        data=res
     )

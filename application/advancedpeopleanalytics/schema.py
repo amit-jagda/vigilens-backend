@@ -1,6 +1,6 @@
 import uuid
 import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 # ==========================================
@@ -111,6 +111,10 @@ class TimelineEventResponse(BaseModel):
     identity_source: str
     identity_confidence: float
     tracker_id: int
+    entry_crop_path: Optional[str] = None
+    exit_crop_path: Optional[str] = None
+    entry_crop_url: Optional[str] = None
+    exit_crop_url: Optional[str] = None
 
     @computed_field
     def duration_seconds(self) -> float:
@@ -149,7 +153,11 @@ class AdvancedVideoProcessItem(BaseModel):
     line_crossing_analysis: Optional[bool] = None
     track_occupancy: Optional[bool] = None
     generate_video: Optional[bool] = None
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
     camera_node_id: Optional[uuid.UUID] = None
+    camera_id: Optional[uuid.UUID] = None
+    camera_name: Optional[str] = None
     recording_started_at: Optional[datetime.datetime] = None
 
 
@@ -165,6 +173,8 @@ class ProcessAdvancedVideosRequest(BaseModel):
     line_crossing_analysis: bool = True
     track_occupancy: bool = True
     generate_video: bool = False
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
 
 
 class AdvancedPeopleAnalyticsSessionResponse(BaseModel):
@@ -176,6 +186,7 @@ class AdvancedPeopleAnalyticsSessionResponse(BaseModel):
     status: str
     session_type: Optional[str] = None
     camera_node_id: Optional[uuid.UUID] = None
+    gallery_media_id: Optional[uuid.UUID] = None
     recording_started_at: Optional[datetime.datetime] = None
     line_start: Optional[List[int]] = None
     line_end: Optional[List[int]] = None
@@ -187,6 +198,8 @@ class AdvancedPeopleAnalyticsSessionResponse(BaseModel):
     line_crossing_analysis: bool
     track_occupancy: bool
     generate_video: bool = False
+    start_time_sec: Optional[float] = None
+    end_time_sec: Optional[float] = None
     unique_person_count: Optional[int] = None
     total_person_count: Optional[int] = None
     first_time_visitor_count: Optional[int] = None
@@ -204,6 +217,15 @@ class AdvancedPeopleAnalyticsSessionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class PersonAppearanceSegment(BaseModel):
+    first_seen_sec: float
+    last_seen_sec: float
+    duration_seconds: float
+    formatted_time: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class SessionDetectedPerson(BaseModel):
     identity_id: Optional[uuid.UUID] = None
     employee_id: Optional[uuid.UUID] = None
@@ -211,13 +233,21 @@ class SessionDetectedPerson(BaseModel):
     name: str
     tracker_id: int
     crop_url: Optional[str] = None
-    first_seen: float
-    last_seen: float
+    first_seen: float = 0.0
+    last_seen: float = 0.0
+    first_seen_sec: float = 0.0
+    last_seen_sec: float = 0.0
+    duration_seconds: float = 0.0
+    formatted_time: Optional[str] = None
+    zone_name: Optional[str] = None
+    sequence_number: Optional[int] = None
     started_at: Optional[datetime.datetime] = None
     ended_at: Optional[datetime.datetime] = None
     confidence: float = 1.0
     identity_source: str = "tracking"
     camera_name: Optional[str] = None
+    appearances_count: int = 1
+    segments: List[PersonAppearanceSegment] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -253,16 +283,20 @@ class VisitorAttendanceResponse(BaseModel):
 
 class RegisterVisitorRequest(BaseModel):
     identity_id: uuid.UUID
-    first_name: str
-    last_name: str
-    registration_type: str = Field("visitor", example="visitor")
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    registration_type: str = Field("visitor", description="'visitor' | 'new_employee' | 'link_existing_employee'")
     employee_code: Optional[str] = None
+    existing_employee_id: Optional[uuid.UUID] = None
     department: Optional[str] = None
+    retroactive_attendance: bool = Field(True, description="If true, converts visitor attendance logs to employee attendance")
+    force: bool = Field(False, description="If true, bypasses the 0.15 low similarity safeguard")
 
 
 class PersonSummaryItem(BaseModel):
     person_type: str  # "employee" | "visitor"
     person_id: uuid.UUID
+    identity_id: Optional[uuid.UUID] = None
     name: str
     employee_code: Optional[str] = None
     crop_url: Optional[str] = None
@@ -274,4 +308,138 @@ class PersonSummaryItem(BaseModel):
     latest_event_type: str = "presence"
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ==========================================
+# SUB-CLIP & PHOTO DWELL ANALYTICS SCHEMAS
+# ==========================================
+
+class CreateSubclipRequest(BaseModel):
+    session_id: Optional[uuid.UUID] = None
+    gallery_media_id: Optional[uuid.UUID] = None
+    video_path: Optional[str] = None
+    start_time: str = Field(..., description="Start time formatted as HH:MM:SS or seconds float/int (e.g. '00:12:00' or '720')")
+    end_time: str = Field(..., description="End time formatted as HH:MM:SS or seconds float/int (e.g. '00:12:05' or '725')")
+    save_to_gallery: bool = Field(True, description="If true, registers subclip into gallery_media")
+
+
+class SubclipResponse(BaseModel):
+    clip_path: str
+    clip_url: str
+    duration_seconds: float
+    gallery_media_id: Optional[uuid.UUID] = None
+
+
+class PlaceDwellItem(BaseModel):
+    camera_name: str
+    zone_name: Optional[str] = None
+    duration_seconds: float
+    formatted_duration: str
+    visit_count: int
+
+
+class PersonDwellByPhotoResponse(BaseModel):
+    matched: bool
+    identity_id: Optional[uuid.UUID] = None
+    person_type: Optional[str] = None  # "employee" | "visitor"
+    name: Optional[str] = None
+    employee_code: Optional[str] = None
+    confidence: float = 0.0
+    total_dwell_seconds: float = 0.0
+    formatted_total_dwell: str = "0s"
+    first_seen_at: Optional[datetime.datetime] = None
+    last_seen_at: Optional[datetime.datetime] = None
+    placewise_dwell: List[PlaceDwellItem] = Field(default_factory=list)
+    timeline_events: List[TimelineEventResponse] = Field(default_factory=list)
+
+
+# ==========================================
+# DAILY CHECK-IN, HOURLY DWELL & REVIEW QUEUE
+# ==========================================
+
+class DailyCheckinResponse(BaseModel):
+    employee_id: uuid.UUID
+    employee_name: str
+    employee_code: Optional[str] = None
+    checkin_date: datetime.date
+    face_registered: bool
+    appearance_anchored: bool
+    message: str
+
+
+class HourlyAreaDwellItem(BaseModel):
+    hour: str
+    hour_int: int
+    total_dwell_seconds: float
+    portion_of_hour: float  # 0.0 to 1.0 (max 1 hour)
+    formatted_duration: str
+    areas: Dict[str, float] = Field(default_factory=dict)  # area_name -> seconds
+
+
+class HourlyDwellResponse(BaseModel):
+    target_date: datetime.date
+    person_id: Optional[uuid.UUID] = None
+    person_name: Optional[str] = None
+    all_areas: List[str] = Field(default_factory=list)
+    hourly_data: List[HourlyAreaDwellItem] = Field(default_factory=list)
+
+
+class ReviewQueueCandidate(BaseModel):
+    identity_id: uuid.UUID
+    crop_url: Optional[str] = None
+    first_seen_at: Optional[datetime.datetime] = None
+    last_seen_at: Optional[datetime.datetime] = None
+    total_dwell_seconds: float = 0.0
+    camera_stops_count: int = 0
+    cameras_visited: List[str] = Field(default_factory=list)
+    suggested_employee_id: Optional[uuid.UUID] = None
+    suggested_employee_name: Optional[str] = None
+    suggested_similarity: Optional[float] = None
+
+
+class ReconcileIdentityRequest(BaseModel):
+    target_employee_id: Optional[uuid.UUID] = None
+    or_visitor_name: Optional[str] = None
+    auto_merge_similar: bool = True
+    similarity_threshold: float = Field(0.65, ge=0.0, le=1.0)
+
+
+# ==========================================
+# SEARCH BY PHOTO / REFERENCE IMAGE
+# ==========================================
+
+class PhotoSearchAppearanceItem(BaseModel):
+    session_id: Optional[uuid.UUID] = None
+    camera_id: Optional[uuid.UUID] = None
+    camera_name: Optional[str] = "Unknown Camera"
+    zone_name: Optional[str] = None
+    timestamp: datetime.datetime
+    timestamp_offset_seconds: Optional[float] = None
+    dwell_seconds: Optional[float] = None
+    crop_url: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    event_type: Optional[str] = "appearance"
+
+
+class PhotoSearchMatchItem(BaseModel):
+    identity_type: str  # "employee" | "visitor"
+    identity_id: uuid.UUID
+    name: str
+    code: Optional[str] = None
+    similarity_score: float  # e.g. 0.88
+    similarity_percentage: str  # e.g. "88%"
+    matched_via: str  # "face" | "appearance" | "fusion"
+    primary_photo_url: Optional[str] = None
+    total_appearances: int = 0
+    first_seen_at: Optional[datetime.datetime] = None
+    last_seen_at: Optional[datetime.datetime] = None
+    timeline_events: List[PhotoSearchAppearanceItem] = Field(default_factory=list)
+
+
+class PhotoSearchResponse(BaseModel):
+    query_processed: bool = True
+    face_detected_in_query: bool = False
+    appearance_extracted: bool = False
+    total_matches_found: int = 0
+    matches: List[PhotoSearchMatchItem] = Field(default_factory=list)
 
