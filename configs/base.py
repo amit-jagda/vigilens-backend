@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen2.5-coder:latest"
     
+    # SQL Agent Execution Constraints
+    SQL_AGENT_TIMEOUT_SECONDS: float = 10.0
+    SQL_AGENT_MAX_ROWS: int = 100
+    SQL_AGENT_MAX_RETRIES: int = 3
+    
     # COCO Multi-Class Detection & Object Tracking Configuration
     APA_TRACKED_CLASSES: list[str] = [
         "person",
