@@ -162,6 +162,21 @@ async def startup_event():
             await conn.execute(
                 text("ALTER TABLE advanced_people_analytics_sessions ADD COLUMN IF NOT EXISTS generate_video BOOLEAN DEFAULT FALSE;")
             )
+            await conn.execute(
+                text("ALTER TABLE advanced_people_analytics_sessions ADD COLUMN IF NOT EXISTS track_objects BOOLEAN DEFAULT TRUE;")
+            )
+            await conn.execute(
+                text("ALTER TABLE advanced_people_analytics_sessions ADD COLUMN IF NOT EXISTS classes_to_track JSONB;")
+            )
+            await conn.execute(
+                text("ALTER TABLE advanced_people_analytics_sessions ADD COLUMN IF NOT EXISTS detected_objects_summary JSONB;")
+            )
+            await conn.execute(
+                text("ALTER TABLE person_timeline_events ADD COLUMN IF NOT EXISTS associated_objects JSONB;")
+            )
+            await conn.execute(
+                text("ALTER TABLE advanced_person_occurrences ADD COLUMN IF NOT EXISTS associated_objects JSONB;")
+            )
     except Exception as e:
         print(f"Startup DB column sync warning: {e}")
 

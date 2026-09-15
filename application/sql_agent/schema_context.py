@@ -81,6 +81,7 @@ Every query MUST filter by tenant:
    - `tracker_id` (INTEGER)
    - `entry_crop_path` (VARCHAR, nullable)
    - `exit_crop_path` (VARCHAR, nullable)
+   - `associated_objects` (JSONB, array of strings e.g. ["backpack", "laptop", "bottle", "suitcase", "cell phone"])
 
 7. `advanced_people_analytics_sessions` (CCTV video processing batches)
    - `id` (UUID, PK)
@@ -99,6 +100,7 @@ Every query MUST filter by tenant:
    - `employee_count` (INTEGER)
    - `visitor_count` (INTEGER)
    - `occupancy_timeline` (JSONB)
+   - `detected_objects_summary` (JSONB, dictionary of detected counts e.g. {"backpack": 15, "laptop": 4, "bottle": 8, "cell phone": 12})
    - `completed_at` (TIMESTAMPTZ)
 
 8. `advanced_visitor_attendance_logs` (Daily visitor presence logs)
@@ -225,6 +227,36 @@ JOIN advanced_person_identities i ON pte.identity_id = i.id
 WHERE pte.tenant_id = '{tenant_id}'
   AND (i.visitor_name ILIKE '%1042%' OR i.id::text ILIKE '%1042%')
 ORDER BY pte.started_at ASC;"""
+    },
+    {
+        "question": "Which persons were carrying backpacks, laptops, or suitcases?",
+        "sql": """SELECT 
+    i.id AS person_id,
+    COALESCE(i.visitor_name, CONCAT(e.first_name, ' ', e.last_name), 'Unknown') AS name,
+    pte.camera_name,
+    pte.associated_objects,
+    pte.started_at
+FROM person_timeline_events pte
+JOIN advanced_person_identities i ON pte.identity_id = i.id
+LEFT JOIN employees e ON i.employee_id = e.id
+WHERE pte.tenant_id = '{tenant_id}'
+  AND pte.associated_objects IS NOT NULL
+  AND jsonb_array_length(pte.associated_objects) > 0
+ORDER BY pte.started_at DESC
+LIMIT 25;"""
+    },
+    {
+        "question": "What objects and items were detected across all sessions?",
+        "sql": """SELECT 
+    s.id AS session_id,
+    s.video_name,
+    s.detected_objects_summary,
+    s.completed_at
+FROM advanced_people_analytics_sessions s
+WHERE s.tenant_id = '{tenant_id}'
+  AND s.detected_objects_summary IS NOT NULL
+ORDER BY s.created_at DESC
+LIMIT 10;"""
     }
 ]
 

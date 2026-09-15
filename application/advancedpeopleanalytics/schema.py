@@ -115,6 +115,7 @@ class TimelineEventResponse(BaseModel):
     exit_crop_path: Optional[str] = None
     entry_crop_url: Optional[str] = None
     exit_crop_url: Optional[str] = None
+    associated_objects: Optional[List[str]] = None
 
     @computed_field
     def duration_seconds(self) -> float:
@@ -152,6 +153,8 @@ class AdvancedVideoProcessItem(BaseModel):
     track_repeat_visitors: Optional[bool] = None
     line_crossing_analysis: Optional[bool] = None
     track_occupancy: Optional[bool] = None
+    track_objects: Optional[bool] = None
+    classes_to_track: Optional[List[str]] = None
     generate_video: Optional[bool] = None
     start_time: Optional[float] = None
     end_time: Optional[float] = None
@@ -172,6 +175,8 @@ class ProcessAdvancedVideosRequest(BaseModel):
     track_repeat_visitors: bool = True
     line_crossing_analysis: bool = True
     track_occupancy: bool = True
+    track_objects: bool = True
+    classes_to_track: Optional[List[str]] = None
     generate_video: bool = False
     start_time: Optional[float] = None
     end_time: Optional[float] = None
@@ -197,6 +202,8 @@ class AdvancedPeopleAnalyticsSessionResponse(BaseModel):
     track_repeat_visitors: bool
     line_crossing_analysis: bool
     track_occupancy: bool
+    track_objects: bool = True
+    classes_to_track: Optional[List[str]] = None
     generate_video: bool = False
     start_time_sec: Optional[float] = None
     end_time_sec: Optional[float] = None
@@ -210,6 +217,7 @@ class AdvancedPeopleAnalyticsSessionResponse(BaseModel):
     employee_count: Optional[int] = None
     visitor_count: Optional[int] = None
     occupancy_timeline: Optional[List[dict]] = None
+    detected_objects_summary: Optional[Dict[str, int]] = None
     completed_percentage: Optional[int] = 0
     created_at: datetime.datetime
     completed_at: Optional[datetime.datetime] = None

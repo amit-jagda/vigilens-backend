@@ -321,7 +321,8 @@ class AdvancedPeopleAnalyticsRepository:
         identity_id: Optional[uuid.UUID] = None,
         zone_name: Optional[str] = None,
         entry_crop_path: Optional[str] = None,
-        exit_crop_path: Optional[str] = None
+        exit_crop_path: Optional[str] = None,
+        associated_objects: Optional[list[str]] = None
     ) -> PersonTimelineEvent:
         event = PersonTimelineEvent(
             tenant_id=tenant_id,
@@ -338,7 +339,8 @@ class AdvancedPeopleAnalyticsRepository:
             identity_confidence=identity_confidence,
             tracker_id=tracker_id,
             entry_crop_path=entry_crop_path,
-            exit_crop_path=exit_crop_path
+            exit_crop_path=exit_crop_path,
+            associated_objects=associated_objects
         )
         self.db.add(event)
         await self.db.flush()
@@ -415,9 +417,9 @@ class AdvancedPeopleAnalyticsRepository:
         confidence_threshold: float = 0.3,
         track_employees: bool = True,
         register_new_visitors: bool = True,
-        track_repeat_visitors: bool = True,
-        line_crossing_analysis: bool = True,
         track_occupancy: bool = True,
+        track_objects: bool = True,
+        classes_to_track: Optional[list[str]] = None,
         generate_video: bool = False,
         camera_node_id: Optional[uuid.UUID] = None,
         recording_started_at: Optional[datetime.datetime] = None,
@@ -438,6 +440,8 @@ class AdvancedPeopleAnalyticsRepository:
             track_repeat_visitors=track_repeat_visitors,
             line_crossing_analysis=line_crossing_analysis,
             track_occupancy=track_occupancy,
+            track_objects=track_objects,
+            classes_to_track=classes_to_track,
             generate_video=generate_video,
             camera_node_id=camera_node_id,
             recording_started_at=recording_started_at,
@@ -480,6 +484,7 @@ class AdvancedPeopleAnalyticsRepository:
         employee_count: Optional[int] = None,
         visitor_count: Optional[int] = None,
         occupancy_timeline: Optional[List[dict]] = None,
+        detected_objects_summary: Optional[dict] = None,
         output_video_path: Optional[str] = None,
         status: str = "completed"
     ):
@@ -513,6 +518,8 @@ class AdvancedPeopleAnalyticsRepository:
             session.visitor_count = visitor_count
         if occupancy_timeline is not None:
             session.occupancy_timeline = occupancy_timeline
+        if detected_objects_summary is not None:
+            session.detected_objects_summary = detected_objects_summary
         if output_video_path is not None:
             session.output_video_path = output_video_path
         session.completed_at = datetime.datetime.now(datetime.timezone.utc)

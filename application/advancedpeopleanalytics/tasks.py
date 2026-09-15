@@ -53,6 +53,14 @@ from application.utils.video_utils import (
 )
 from application.utils.face_rec import face_rec_service
 from application.utils.reid import reid_service
+from application.advancedpeopleanalytics.coco_registry import (
+    COCO_CLASS_TO_ID,
+    COCO_ID_TO_CLASS,
+    DEFAULT_APA_TRACKED_CLASSES,
+    resolve_class_ids,
+    calculate_containment_ratio,
+    calculate_bbox_iou,
+)
 from configs.base import settings
 
 ADVANCED_OUTPUTS_DIR = os.path.join("storage", "advanced_people_analytics_outputs")
@@ -91,6 +99,7 @@ def process_advanced_people_analytics_task(
     track_repeat_visitors: bool = True,
     line_crossing_analysis: bool = True,
     track_occupancy: bool = True,
+    track_objects: bool = True,
     generate_video: bool = False
 ):
     """
@@ -158,7 +167,7 @@ def process_advanced_people_analytics_task(
                         user_id_str=user_id_str, track_employees=track_employees,
                         register_new_visitors=register_new_visitors, track_repeat_visitors=track_repeat_visitors,
                         line_crossing_analysis=line_crossing_analysis, track_occupancy=track_occupancy,
-                        generate_video=generate_video
+                        track_objects=track_objects, generate_video=generate_video
                     )
 
                 logger.info(f"Advanced People Analytics completed successfully for session ID {session_id}.")
@@ -218,7 +227,7 @@ async def _process_image_job(
 async def _process_video_job(
     db, repo, session, filepath, model, employee_cache, line_start, line_end, similarity_threshold, confidence_threshold, user_id_str=None,
     track_employees: bool = True, register_new_visitors: bool = True, track_repeat_visitors: bool = True, line_crossing_analysis: bool = True, track_occupancy: bool = True,
-    generate_video: bool = False
+    track_objects: bool = True, generate_video: bool = False
 ):
     cap = cv2.VideoCapture(filepath)
     if not cap.isOpened():
@@ -320,6 +329,13 @@ async def _process_video_job(
     occupancy_history = []
     peak_occupancy_so_far = 0
 
+    # Configure multi-class COCO tracking (Person + 12 Carried/Office Object Classes)
+    track_objects_flag = getattr(session, "track_objects", True) if track_objects is None else track_objects
+    raw_classes = getattr(session, "classes_to_track", None) or getattr(settings, "APA_TRACKED_CLASSES", DEFAULT_APA_TRACKED_CLASSES)
+    target_class_ids = resolve_class_ids(raw_classes if track_objects_flag else ["person"])
+    session_detected_objects = defaultdict(int)
+    logger.info(f"🎯 [Session {session.id}] TRACKED COCO CLASSES ({len(target_class_ids)}): {[COCO_ID_TO_CLASS.get(cid, str(cid)) for cid in target_class_ids]}")
+
     # Pre-cache active identities and their ReID embeddings for this video's specific date in memory (0ms lookup)
     db_identities = await repo.get_active_identities_with_embeddings(session.tenant_id, class_id=0, target_date=video_date)
     session_reid_cache = []
@@ -398,10 +414,35 @@ async def _process_video_job(
         except Exception:
             pass
 
-        # Run accelerated YOLO inference on every sampled frame (imgsz=640)
-        results = model(frame, imgsz=640, conf=float(confidence_threshold), classes=[0], verbose=False)
-        detections = sv.Detections.from_ultralytics(results[0])
-        detections = tracker.update_with_detections(detections)
+        # Run accelerated YOLO inference on every sampled frame with target COCO classes (imgsz=640)
+        results = model(frame, imgsz=640, conf=float(confidence_threshold), classes=target_class_ids, verbose=False)
+        raw_detections = sv.Detections.from_ultralytics(results[0])
+
+        # Separate person detections (class_id == 0) and object detections (class_id != 0)
+        if len(raw_detections) > 0:
+            person_mask_indices = (raw_detections.class_id == 0)
+            person_detections = raw_detections[person_mask_indices]
+            object_detections = raw_detections[~person_mask_indices] if track_objects_flag else None
+        else:
+            person_detections = raw_detections
+            object_detections = None
+
+        detections = tracker.update_with_detections(person_detections)
+
+        # Process detected objects and associate with active person tracks
+        if object_detections is not None and len(object_detections) > 0:
+            for obj_xyxy, obj_cid in zip(object_detections.xyxy, object_detections.class_id):
+                obj_name = COCO_ID_TO_CLASS.get(int(obj_cid), f"object_{obj_cid}")
+                session_detected_objects[obj_name] += 1
+                
+                # Spatial association with persons in current frame
+                if detections.tracker_id is not None:
+                    for p_xyxy, p_tid in zip(detections.xyxy, detections.tracker_id):
+                        if p_tid is not None and p_tid in active_tracks:
+                            containment = calculate_containment_ratio(obj_xyxy, p_xyxy)
+                            iou = calculate_bbox_iou(obj_xyxy, p_xyxy)
+                            if containment > 0.35 or iou > 0.15:
+                                active_tracks[p_tid]["associated_objects"].add(obj_name)
 
         current_occupancy = len(detections) if detections.tracker_id is not None else 0
         occupancy_history.append({"time_sec": round(timestamp_sec, 2), "occupancy": current_occupancy})
@@ -483,6 +524,7 @@ async def _process_video_job(
                         "is_segmented": False,
                         "mask_coverage": None,
                         "current_zones": set(),
+                        "associated_objects": set(),
                         "face_confirmed": False,
                         "best_face_quality": 0.0,
                         "best_bbox_height": bbox_height,
@@ -928,7 +970,8 @@ async def _process_video_job(
             employee_id=info["employee_id"],
             identity_id=info["identity_id"],
             entry_crop_path=info.get("entry_crop_path"),
-            exit_crop_path=info.get("exit_crop_path")
+            exit_crop_path=info.get("exit_crop_path"),
+            associated_objects=list(info["associated_objects"]) if info.get("associated_objects") else None
         )
 
         # Log employee attendance when matched in video analysis
@@ -992,6 +1035,7 @@ async def _process_video_job(
         employee_count=emp_count,
         visitor_count=vis_count,
         occupancy_timeline=occupancy_history if track_occupancy else None,
+        detected_objects_summary=dict(session_detected_objects) if track_objects_flag else None,
         output_video_path=output_path if generate_video else None
     )
     await db.commit()

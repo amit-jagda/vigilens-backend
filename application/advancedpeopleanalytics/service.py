@@ -290,6 +290,8 @@ class AdvancedPeopleAnalyticsService:
         global_track_repeat_visitors: bool = True,
         global_line_crossing_analysis: bool = True,
         global_track_occupancy: bool = True,
+        global_track_objects: bool = True,
+        global_classes_to_track: Optional[List[str]] = None,
         global_generate_video: bool = False,
         global_start_time: Optional[float] = None,
         global_end_time: Optional[float] = None,
@@ -344,6 +346,8 @@ class AdvancedPeopleAnalyticsService:
             track_repeat_visitors = item.track_repeat_visitors if item.track_repeat_visitors is not None else global_track_repeat_visitors
             line_crossing_analysis = item.line_crossing_analysis if item.line_crossing_analysis is not None else global_line_crossing_analysis
             track_occupancy = item.track_occupancy if item.track_occupancy is not None else global_track_occupancy
+            track_objects = item.track_objects if item.track_objects is not None else global_track_objects
+            classes_to_track = item.classes_to_track if item.classes_to_track is not None else global_classes_to_track
             generate_video = item.generate_video if item.generate_video is not None else global_generate_video
             start_time = item.start_time if item.start_time is not None else global_start_time
             end_time = item.end_time if item.end_time is not None else global_end_time
@@ -381,6 +385,8 @@ class AdvancedPeopleAnalyticsService:
                 track_repeat_visitors=track_repeat_visitors,
                 line_crossing_analysis=line_crossing_analysis,
                 track_occupancy=track_occupancy,
+                track_objects=track_objects,
+                classes_to_track=classes_to_track,
                 generate_video=generate_video,
                 camera_node_id=effective_camera_node_id,
                 recording_started_at=item.recording_started_at,
@@ -406,6 +412,7 @@ class AdvancedPeopleAnalyticsService:
                 track_repeat_visitors,
                 line_crossing_analysis,
                 track_occupancy,
+                track_objects,
                 generate_video
             )
 

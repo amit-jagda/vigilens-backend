@@ -509,6 +509,8 @@ async def process_batch_sessions(
         global_track_repeat_visitors=req_obj.track_repeat_visitors,
         global_line_crossing_analysis=req_obj.line_crossing_analysis,
         global_track_occupancy=req_obj.track_occupancy,
+        global_track_objects=req_obj.track_objects,
+        global_classes_to_track=req_obj.classes_to_track,
         global_generate_video=req_obj.generate_video,
         global_start_time=req_obj.start_time,
         global_end_time=req_obj.end_time,
