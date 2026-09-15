@@ -417,6 +417,8 @@ class AdvancedPeopleAnalyticsRepository:
         confidence_threshold: float = 0.3,
         track_employees: bool = True,
         register_new_visitors: bool = True,
+        track_repeat_visitors: bool = True,
+        line_crossing_analysis: bool = True,
         track_occupancy: bool = True,
         track_objects: bool = True,
         classes_to_track: Optional[list[str]] = None,
