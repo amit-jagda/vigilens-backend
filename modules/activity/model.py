@@ -1,13 +1,16 @@
 import uuid
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from sqlalchemy import String, Integer, Float, ForeignKey, Boolean, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import ARRAY
 
 from database.base import BaseModel
-from modules.gallery.model import GalleryMedia
+
+if TYPE_CHECKING:
+    from modules.gallery.model import GalleryMedia
 
 class ActivityConfig(BaseModel):
+
     """
     Stores safety and security monitoring parameters (like ROI boundary) for a gallery media item.
     """

@@ -1,7 +1,11 @@
 import uuid
+from typing import TYPE_CHECKING, Optional
 from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from database.base import BaseModel
+
+if TYPE_CHECKING:
+    from modules.activity.model import ActivityConfig
 
 class GalleryMedia(BaseModel):
     """
@@ -17,4 +21,6 @@ class GalleryMedia(BaseModel):
     media_type: Mapped[str] = mapped_column(String(20), nullable=False)  # 'photo' | 'video'
     status: Mapped[str] = mapped_column(String(20), default="pending")    # 'pending' | 'processing' | 'completed' | 'failed'
 
-    config = relationship("ActivityConfig", back_populates="gallery_media", lazy="selectin", uselist=False)
+    config: Mapped[Optional["ActivityConfig"]] = relationship("ActivityConfig", back_populates="gallery_media", lazy="selectin", uselist=False)
+
+

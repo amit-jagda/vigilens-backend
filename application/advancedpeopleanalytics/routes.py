@@ -35,11 +35,13 @@ from application.advancedpeopleanalytics.schema import (
     SubclipResponse,
     PersonDwellByPhotoResponse,
     DailyCheckinResponse,
+    DailyCheckinRecordResponse,
     HourlyDwellResponse,
     ReviewQueueCandidate,
     ReconcileIdentityRequest,
     PhotoSearchResponse
 )
+
 
 router = APIRouter(prefix="/advancedpeopleanalytics", tags=["Advanced People Analytics Suite"])
 
@@ -900,6 +902,39 @@ async def daily_employee_checkin(
         status=status.HTTP_200_OK,
         data=res
     )
+
+
+@router.get(
+    "/daily-checkins",
+    response_model=StandardResponse[List[DailyCheckinRecordResponse]],
+    status_code=status.HTTP_200_OK
+)
+async def list_daily_checkins(
+    checkin_date: Optional[datetime.date] = Query(None, description="Filter by specific check-in date (YYYY-MM-DD)"),
+    employee_id: Optional[uuid.UUID] = Query(None, description="Filter by employee UUID"),
+    start_date: Optional[datetime.date] = Query(None, description="Start date for range filter"),
+    end_date: Optional[datetime.date] = Query(None, description="End date for range filter"),
+    current_user: User = Depends(require_viewer),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Lists all employee daily check-in anchors with date and employee filtering.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    records = await service.get_daily_checkins(
+        tenant_id=tenant_id,
+        checkin_date=checkin_date,
+        employee_id=employee_id,
+        start_date=start_date,
+        end_date=end_date
+    )
+    return StandardResponse(
+        message=f"Successfully retrieved {len(records)} daily check-in record(s).",
+        status=status.HTTP_200_OK,
+        data=records
+    )
+
 
 
 # ==========================================

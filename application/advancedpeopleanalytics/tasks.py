@@ -550,7 +550,7 @@ async def _process_video_job(
                     (processed_frame_idx % 2 == 0 or face_shots == 0)
                 )
                 should_extract_reid = (
-                    track_info["reid_embedding"] is None and
+                    (track_info["reid_embedding"] is None or (track_info.get("person_type") == "employee" and processed_frame_idx % 8 == 0)) and
                     (mask_coverage is None or mask_coverage >= 0.35)
                 )
 
@@ -560,9 +560,21 @@ async def _process_video_job(
                     if should_extract_reid and body_crop is not None and body_crop.size > 0:
                         reid_vec = reid_service.extract_embedding(body_crop)
                         if reid_vec is not None:
-                            track_info["reid_embedding"] = reid_vec.tolist()
-                            track_info["is_segmented"] = person_mask is not None
-                            track_info["mask_coverage"] = mask_coverage
+                            if track_info["reid_embedding"] is None:
+                                track_info["reid_embedding"] = reid_vec.tolist()
+                                track_info["is_segmented"] = person_mask is not None
+                                track_info["mask_coverage"] = mask_coverage
+                            elif track_info.get("identity_id") and track_info.get("person_type") == "employee":
+                                # Multi-view viewpoint anchoring (captures both front, side, and back views as person walks)
+                                t_v = np.array(reid_vec, dtype=np.float32)
+                                t_n = np.linalg.norm(t_v)
+                                if t_n > 0:
+                                    t_unit = t_v / t_n
+                                    sims = [float(np.dot(t_unit, e)) for i, e in session_reid_cache if i.id == track_info["identity_id"]]
+                                    if not sims or max(sims) < 0.85:
+                                        matching_ident = next((i for i, e in session_reid_cache if i.id == track_info["identity_id"]), None)
+                                        if matching_ident:
+                                            session_reid_cache.append((matching_ident, t_unit))
 
                     faces = []
                     face_crop = None
@@ -631,7 +643,7 @@ async def _process_video_job(
                     if match_emp:
                         employee, sim = match_emp
                         claimed_by_other = any(
-                            t_id != tracker_id and t.get("employee_id") == employee.id and t.get("face_confirmed")
+                            t_id != tracker_id and t.get("employee_id") == employee.id and t.get("face_confirmed") and abs(timestamp_sec - t.get("last_seen", 0)) < 0.25
                             for t_id, t in active_tracks.items()
                         )
                         
@@ -662,6 +674,7 @@ async def _process_video_job(
                                 employee_id=employee.id,
                                 employee_name=track_info["employee_name"]
                             )
+                            prev_temp_id = track_info.get("identity_id")
                             track_info["identity_id"] = emp_identity.id
 
                             # Deactivate older appearance embeddings for this employee (older than video_date)
@@ -681,6 +694,18 @@ async def _process_video_job(
                                     is_active=True,
                                     face_anchored=True
                                 )
+
+                                # CRITICAL: LIVE SYNC IN-MEMORY REID CACHE
+                                t_v = np.array(track_info["reid_embedding"], dtype=np.float32)
+                                t_n = np.linalg.norm(t_v)
+                                if t_n > 0:
+                                    t_unit = t_v / t_n
+                                    # Remove any temporary visitor identity or old entry for this employee
+                                    session_reid_cache = [
+                                        (i, e) for i, e in session_reid_cache
+                                        if i.id != emp_identity.id and (prev_temp_id is None or i.id != prev_temp_id)
+                                    ]
+                                    session_reid_cache.append((emp_identity, t_unit))
 
                             # Save PERMANENT Face Embedding (Never deactivated across dates)
                             if face_embedding is not None:
@@ -706,6 +731,7 @@ async def _process_video_job(
                     # PHASE 2: If no face matched or face is not visible, check Full-Body ReID Appearance in memory (0ms)
                     if track_info["reid_embedding"] and not track_info["face_confirmed"]:
                         match_vis = None
+                        all_cand_sims = []
                         if track_repeat_visitors and session_reid_cache:
                             t_vec = np.array(track_info["reid_embedding"], dtype=np.float32)
                             t_norm = np.linalg.norm(t_vec)
@@ -714,7 +740,12 @@ async def _process_video_job(
                                 best_vis, best_sim = None, 0.0
                                 for v_ident, v_emb in session_reid_cache:
                                     sim = float(np.dot(t_unit, v_emb))
-                                    if sim >= REID_SIMILARITY_THRESHOLD and sim > best_sim:
+                                    all_cand_sims.append((v_ident, sim))
+                                    
+                                    # Target similarity threshold: Adaptive (0.58) for face-anchored employees across front/back angle shifts,
+                                    # and standard threshold for unknown general visitors
+                                    req_thresh = 0.58 if (v_ident.is_employee or v_ident.visitor_name) else REID_SIMILARITY_THRESHOLD
+                                    if sim >= req_thresh and sim > best_sim:
                                         best_sim = sim
                                         best_vis = v_ident
                                 if best_vis is not None:
@@ -722,8 +753,9 @@ async def _process_video_job(
 
                         if match_vis:
                             visitor, sim = match_vis
+                            # Only block if ANOTHER track is currently in the same frame simultaneously
                             claimed_by_other = any(
-                                t_id != tracker_id and t.get("identity_id") == visitor.id
+                                t_id != tracker_id and t.get("identity_id") == visitor.id and abs(timestamp_sec - t.get("last_seen", 0)) < 0.25
                                 for t_id, t in active_tracks.items()
                             )
                             if not claimed_by_other:
@@ -737,6 +769,7 @@ async def _process_video_job(
                                         track_info["employee_id"] = visitor.employee_id
                                         track_info["employee_name"] = f"{emp_obj.first_name} {emp_obj.last_name}"
                                         track_info["employee_code"] = emp_obj.employee_code
+                                        track_info["face_confirmed"] = True
                                         logger.info(
                                             f"{CLR_YG}  👤 [Track #{tracker_id}] EMPLOYEE RE-MATCHED VIA REID: {track_info['employee_name']} "
                                             f"(Code: {track_info['employee_code']}) | ReID Similarity: {sim*100:.1f}%{CLR_RST}"
@@ -761,8 +794,19 @@ async def _process_video_job(
                                         f"{CLR_CYAN}  🏷️ [Track #{tracker_id}] VISITOR MATCHED: Identity {str(visitor.id)[:8]} "
                                         f"| ReID Similarity: {sim*100:.1f}%{CLR_RST}"
                                     )
-
                         elif register_new_visitors and track_info["identity_id"] is None:
+                            # Diagnostic logging when closest candidate is below threshold
+                            if all_cand_sims:
+                                top_cand, top_sim = max(all_cand_sims, key=lambda x: x[1])
+                                top_name = (
+                                    f"Employee {top_cand.visitor_name or top_cand.employee_id}" 
+                                    if top_cand.is_employee else (top_cand.visitor_name or f"Identity {str(top_cand.id)[:8]}")
+                                )
+                                req_th = 0.58 if top_cand.is_employee else REID_SIMILARITY_THRESHOLD
+                                logger.info(
+                                    f"  🔍 [Track #{tracker_id}] ReID appearance scan -> Closest: {top_name} ({top_sim*100:.1f}%) | Required Threshold: {req_th*100:.1f}%"
+                                )
+
                             visitor = await repo.create_person_identity(session.tenant_id, class_id=0)
                             track_info["identity_id"] = visitor.id
                             track_info["identity_source"] = "reid"

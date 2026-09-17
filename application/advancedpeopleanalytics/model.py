@@ -413,3 +413,22 @@ class PersonTimelineEvent(BaseModel):
             return max(0.0, float((self.ended_at - self.started_at).total_seconds()))
         return 0.0
 
+
+class AdvancedEmployeeDailyCheckin(BaseModel):
+    """
+    Stores employee daily check-in anchors (face photo and outfit/appearance photo).
+    """
+    __tablename__ = "advanced_employee_daily_checkins"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    employee_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"), nullable=False)
+    checkin_date: Mapped[date] = mapped_column(Date, nullable=False)
+    face_photo_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    appearance_photo_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    face_anchored: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    appearance_anchored: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    notes: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    employee: Mapped["Employee"] = relationship()
+
+

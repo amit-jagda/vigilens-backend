@@ -662,7 +662,10 @@ class AdvancedPeopleAnalyticsRepository:
                     AdvancedPersonEmbedding.recorded_date == target_date,
                     and_(
                         AdvancedPersonEmbedding.is_active == True,
-                        AdvancedPersonEmbedding.recorded_date.is_(None)
+                        or_(
+                            AdvancedPersonEmbedding.recorded_date.is_(None),
+                            AdvancedPersonIdentity.is_employee == True
+                        )
                     )
                 )
             )

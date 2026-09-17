@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     
     # Database Configuration
+    POSTGRES_DB: str = "cv_db"
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/cv_db"
     
     # Security Configuration
@@ -69,16 +70,17 @@ class Settings(BaseSettings):
     # Advanced People Analytics Configuration
     PROCESS_EVERY_FRAME: bool = False  # Set to True to analyze 100% of video frames (native FPS) without skipping
     PROCESSING_FPS: float = 7.5  # Analyzed frames per second when PROCESS_EVERY_FRAME is False (7.5 FPS optimal for 15 FPS native CCTV)
-    ADVANCED_FACE_SIMILARITY_THRESHOLD: float = 0.38
-    ADVANCED_REID_SIMILARITY_THRESHOLD: float = 0.65
+    ADVANCED_FACE_SIMILARITY_THRESHOLD: float = 0.32
+    ADVANCED_REID_SIMILARITY_THRESHOLD: float = 0.72
     ADVANCED_FACE_MIN_SIZE: int = 14
     ADVANCED_FACE_MIN_DET_SCORE: float = 0.35
     ADVANCED_CROSS_CAMERA_MIN_SCORE: float = 0.65
     FEATURE_LOCK_SHOTS: int = 6  # Allow up to 6 face sampling attempts per person
     REID_MEMORY_BANK_TTL_SEC: float = 45.0  # Time window to stitch lost tracks on occlusions
+    REID_MEMORY_BANK_SIMILARITY_THRESHOLD: float = 0.75
     # SQL Agent & LLM Configuration (Cloud / Local)
     LLM_PROVIDER: str = "gemini"  # options: gemini, groq, openai, ollama, openrouter
-    LLM_MODEL: str = "gemini-2.0-flash"  # or gemini-1.5-flash, llama-3.3-70b-versatile, gpt-4o-mini
+    LLM_MODEL: str = "gemini-flash-latest"  # gemini-flash-latest, gemini-2.5-flash-lite, llama-3.3-70b-versatile, gpt-4o-mini
     GEMINI_API_KEY: str = ""
     GROQ_API_KEY: str = ""
     OPENAI_API_KEY: str = ""

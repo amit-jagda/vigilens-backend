@@ -372,7 +372,24 @@ class DailyCheckinResponse(BaseModel):
     checkin_date: datetime.date
     face_registered: bool
     appearance_anchored: bool
+    face_photo_url: Optional[str] = None
+    appearance_photo_url: Optional[str] = None
     message: str
+
+
+class DailyCheckinRecordResponse(BaseModel):
+    id: uuid.UUID
+    employee_id: uuid.UUID
+    employee_name: str
+    employee_code: Optional[str] = None
+    employee_photo: Optional[str] = None
+    checkin_date: datetime.date
+    face_photo_url: str
+    appearance_photo_url: Optional[str] = None
+    face_anchored: bool = True
+    appearance_anchored: bool = False
+    created_at: datetime.datetime
+
 
 
 class HourlyAreaDwellItem(BaseModel):

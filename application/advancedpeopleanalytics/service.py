@@ -22,7 +22,8 @@ from application.advancedpeopleanalytics.model import (
     CameraNodeLink,
     CameraZone,
     CameraZoneLink,
-    PersonTimelineEvent
+    PersonTimelineEvent,
+    AdvancedEmployeeDailyCheckin
 )
 from application.advancedpeopleanalytics.schema import (
     AdvancedVideoProcessItem,
@@ -47,6 +48,7 @@ from application.advancedpeopleanalytics.schema import (
     PlaceDwellItem,
     PersonDwellByPhotoResponse,
     DailyCheckinResponse,
+    DailyCheckinRecordResponse,
     HourlyDwellResponse,
     HourlyAreaDwellItem,
     ReviewQueueCandidate,
@@ -55,6 +57,7 @@ from application.advancedpeopleanalytics.schema import (
     PhotoSearchMatchItem,
     PhotoSearchResponse
 )
+
 
 def format_seconds(seconds: float) -> str:
     secs = int(round(seconds))
@@ -1382,6 +1385,37 @@ class AdvancedPeopleAnalyticsService:
         except Exception as e:
             logger.warning(f"Appearance extraction encountered issue during daily check-in: {e}")
 
+        # Save uploaded check-in photos to storage/checkin_photos
+        checkin_dir = os.path.join("storage", "checkin_photos")
+        os.makedirs(checkin_dir, exist_ok=True)
+        unique_suffix = f"{uuid.uuid4().hex[:8]}"
+        face_filename = f"face_{employee.id}_{checkin_date}_{unique_suffix}.jpg"
+        face_disk_path = os.path.join(checkin_dir, face_filename)
+        with open(face_disk_path, "wb") as f:
+            f.write(face_bytes)
+
+        app_filename = None
+        if appearance_bytes:
+            app_filename = f"app_{employee.id}_{checkin_date}_{unique_suffix}.jpg"
+            app_disk_path = os.path.join(checkin_dir, app_filename)
+            with open(app_disk_path, "wb") as f:
+                f.write(appearance_bytes)
+
+        face_url = f"/storage/checkin_photos/{face_filename}"
+        app_url = f"/storage/checkin_photos/{app_filename}" if app_filename else None
+
+        # Record daily check-in log entry
+        checkin_log = AdvancedEmployeeDailyCheckin(
+            tenant_id=tenant_id,
+            employee_id=employee.id,
+            checkin_date=checkin_date,
+            face_photo_path=face_url,
+            appearance_photo_path=app_url,
+            face_anchored=True,
+            appearance_anchored=(reid_emb is not None)
+        )
+        self.db.add(checkin_log)
+
         await self.db.commit()
 
         return DailyCheckinResponse(
@@ -1391,8 +1425,67 @@ class AdvancedPeopleAnalyticsService:
             checkin_date=checkin_date,
             face_registered=True,
             appearance_anchored=(reid_emb is not None),
+            face_photo_url=face_url,
+            appearance_photo_url=app_url,
             message=f"Successfully anchored daily check-in for {employee.first_name} {employee.last_name} for {checkin_date}."
         )
+
+    async def get_daily_checkins(
+        self,
+        tenant_id: uuid.UUID,
+        checkin_date: Optional[datetime.date] = None,
+        employee_id: Optional[uuid.UUID] = None,
+        start_date: Optional[datetime.date] = None,
+        end_date: Optional[datetime.date] = None
+    ) -> List[DailyCheckinRecordResponse]:
+        """
+        Retrieves all daily check-in anchors with optional date and employee filters.
+        """
+        from modules.employees.model import Employee
+        stmt = (
+            select(AdvancedEmployeeDailyCheckin, Employee)
+            .join(Employee, AdvancedEmployeeDailyCheckin.employee_id == Employee.id)
+            .where(
+                AdvancedEmployeeDailyCheckin.tenant_id == tenant_id,
+                AdvancedEmployeeDailyCheckin.is_delete == False
+            )
+            .order_by(
+                AdvancedEmployeeDailyCheckin.checkin_date.desc(),
+                AdvancedEmployeeDailyCheckin.created_at.desc()
+            )
+        )
+
+        if checkin_date is not None:
+            stmt = stmt.where(AdvancedEmployeeDailyCheckin.checkin_date == checkin_date)
+        if employee_id is not None:
+            stmt = stmt.where(AdvancedEmployeeDailyCheckin.employee_id == employee_id)
+        if start_date is not None:
+            stmt = stmt.where(AdvancedEmployeeDailyCheckin.checkin_date >= start_date)
+        if end_date is not None:
+            stmt = stmt.where(AdvancedEmployeeDailyCheckin.checkin_date <= end_date)
+
+        res = await self.db.execute(stmt)
+        rows = res.all()
+
+        results = []
+        for checkin, emp in rows:
+            results.append(
+                DailyCheckinRecordResponse(
+                    id=checkin.id,
+                    employee_id=emp.id,
+                    employee_name=f"{emp.first_name} {emp.last_name}",
+                    employee_code=emp.employee_code,
+                    employee_photo=emp.photo_path,
+                    checkin_date=checkin.checkin_date,
+                    face_photo_url=checkin.face_photo_path,
+                    appearance_photo_url=checkin.appearance_photo_path,
+                    face_anchored=checkin.face_anchored,
+                    appearance_anchored=checkin.appearance_anchored,
+                    created_at=checkin.created_at
+                )
+            )
+        return results
+
 
     # ==========================================
     # AREA-WISE HOURLY DWELL TIME ANALYTICS
