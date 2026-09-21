@@ -53,6 +53,8 @@ class AdvancedPeopleAnalyticsSession(BaseModel):
     track_repeat_visitors: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     line_crossing_analysis: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     track_occupancy: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    track_objects: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    classes_to_track: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     generate_video: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     
     # Time Range / Sub-Clip Processing (seconds)
@@ -71,6 +73,7 @@ class AdvancedPeopleAnalyticsSession(BaseModel):
     visitor_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     
     occupancy_timeline: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
+    detected_objects_summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Relationships
@@ -183,6 +186,7 @@ class AdvancedPersonOccurrence(BaseModel):
     first_seen: Mapped[float] = mapped_column(Float, nullable=False)
     last_seen: Mapped[float] = mapped_column(Float, nullable=False)
     crop_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    associated_objects: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
 
     session: Mapped["AdvancedPeopleAnalyticsSession"] = relationship(back_populates="occurrences")
     identity: Mapped["AdvancedPersonIdentity"] = relationship(back_populates="occurrences")
@@ -401,10 +405,30 @@ class PersonTimelineEvent(BaseModel):
     tracker_id: Mapped[int] = mapped_column(Integer, nullable=False)
     entry_crop_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     exit_crop_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    associated_objects: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
 
     @property
     def duration_seconds(self) -> float:
         if hasattr(self, "ended_at") and hasattr(self, "started_at") and self.ended_at and self.started_at:
             return max(0.0, float((self.ended_at - self.started_at).total_seconds()))
         return 0.0
+
+
+class AdvancedEmployeeDailyCheckin(BaseModel):
+    """
+    Stores employee daily check-in anchors (face photo and outfit/appearance photo).
+    """
+    __tablename__ = "advanced_employee_daily_checkins"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    employee_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"), nullable=False)
+    checkin_date: Mapped[date] = mapped_column(Date, nullable=False)
+    face_photo_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    appearance_photo_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    face_anchored: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    appearance_anchored: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    notes: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    employee: Mapped["Employee"] = relationship()
+
 

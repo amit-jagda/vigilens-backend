@@ -90,6 +90,7 @@ async def query_assistant(
 
         response_data = AssistantQueryResponseData(
             answer=result["answer"],
+            response_format=result.get("response_format", "general"),
             sql_query=result.get("sql_query"),
             raw_results=result.get("raw_results"),
             execution_time_ms=result.get("execution_time_ms"),

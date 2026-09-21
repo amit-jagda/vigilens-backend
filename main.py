@@ -19,6 +19,7 @@ from modules.smokingdetect.routes import router as smokingdetect_router
 from modules.gallery.routes import router as gallery_router
 from application.advancedpeopleanalytics.routes import router as advancedpeopleanalytics_router
 from application.sql_agent.routes import router as assistant_router
+from modules.settings.routes import router as settings_router
 
 
 from fastapi.staticfiles import StaticFiles
@@ -147,6 +148,7 @@ app.include_router(smokingdetect_router, prefix=settings.API_V1_STR)
 app.include_router(gallery_router, prefix=settings.API_V1_STR)
 app.include_router(advancedpeopleanalytics_router, prefix=settings.API_V1_STR)
 app.include_router(assistant_router, prefix=settings.API_V1_STR)
+app.include_router(settings_router, prefix=settings.API_V1_STR)
 
 
 @app.on_event("startup")
@@ -162,7 +164,43 @@ async def startup_event():
             await conn.execute(
                 text("ALTER TABLE advanced_people_analytics_sessions ADD COLUMN IF NOT EXISTS generate_video BOOLEAN DEFAULT FALSE;")
             )
+            await conn.execute(
+                text("ALTER TABLE advanced_people_analytics_sessions ADD COLUMN IF NOT EXISTS track_objects BOOLEAN DEFAULT TRUE;")
+            )
+            await conn.execute(
+                text("ALTER TABLE advanced_people_analytics_sessions ADD COLUMN IF NOT EXISTS classes_to_track JSONB;")
+            )
+            await conn.execute(
+                text("ALTER TABLE advanced_people_analytics_sessions ADD COLUMN IF NOT EXISTS detected_objects_summary JSONB;")
+            )
+            await conn.execute(
+                text("ALTER TABLE person_timeline_events ADD COLUMN IF NOT EXISTS associated_objects JSONB;")
+            )
+            await conn.execute(
+                text("ALTER TABLE advanced_person_occurrences ADD COLUMN IF NOT EXISTS associated_objects JSONB;")
+            )
+            await conn.execute(
+                text("""
+                    CREATE TABLE IF NOT EXISTS advanced_employee_daily_checkins (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        tenant_id UUID NOT NULL,
+                        employee_id UUID NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+                        checkin_date DATE NOT NULL,
+                        face_photo_path VARCHAR(512) NOT NULL,
+                        appearance_photo_path VARCHAR(512),
+                        face_anchored BOOLEAN DEFAULT TRUE,
+                        appearance_anchored BOOLEAN DEFAULT FALSE,
+                        notes VARCHAR(512),
+                        is_active BOOLEAN DEFAULT TRUE,
+                        is_delete BOOLEAN DEFAULT FALSE,
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        update_at TIMESTAMPTZ DEFAULT NOW()
+                    );
+                """)
+            )
+        os.makedirs(os.path.join("storage", "checkin_photos"), exist_ok=True)
     except Exception as e:
+
         print(f"Startup DB column sync warning: {e}")
 
     import asyncio
