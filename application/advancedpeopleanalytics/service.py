@@ -23,7 +23,9 @@ from application.advancedpeopleanalytics.model import (
     CameraZone,
     CameraZoneLink,
     PersonTimelineEvent,
-    AdvancedEmployeeDailyCheckin
+    AdvancedEmployeeDailyCheckin,
+    FloorPlan,
+    SpatialLine
 )
 from application.advancedpeopleanalytics.schema import (
     AdvancedVideoProcessItem,
@@ -55,7 +57,12 @@ from application.advancedpeopleanalytics.schema import (
     ReconcileIdentityRequest,
     PhotoSearchAppearanceItem,
     PhotoSearchMatchItem,
-    PhotoSearchResponse
+    PhotoSearchResponse,
+    FloorPlanCreate,
+    FloorPlanResponse,
+    FloorPlanLayoutResponse,
+    SaveLayoutRequest,
+    SpatialLineResponse
 )
 
 
@@ -211,6 +218,75 @@ class AdvancedPeopleAnalyticsService:
             )
         await self.db.commit()
         return True
+
+    # ==========================================
+    # FLOOR PLANS & SPATIAL LINES
+    # ==========================================
+
+    async def create_floor_plan(self, tenant_id: uuid.UUID, data: FloorPlanCreate) -> FloorPlanResponse:
+        floor_plan = await self.repo.create_floor_plan(
+            tenant_id=tenant_id,
+            name=data.name,
+            canvas_width_px=data.canvas_width_px,
+            canvas_height_px=data.canvas_height_px,
+            scale_meters_per_px=data.scale_meters_per_px,
+            image_filepath=data.image_filepath
+        )
+        await self.db.commit()
+        await self.db.refresh(floor_plan)
+        return FloorPlanResponse.model_validate(floor_plan)
+
+    async def get_floor_plans(self, tenant_id: uuid.UUID) -> List[FloorPlanResponse]:
+        floor_plans = await self.repo.get_floor_plans(tenant_id)
+        return [FloorPlanResponse.model_validate(fp) for fp in floor_plans]
+
+    async def get_floor_plan_layout(self, tenant_id: uuid.UUID, floor_plan_id: uuid.UUID) -> FloorPlanLayoutResponse:
+        floor_plan = await self.repo.get_floor_plan_by_id(floor_plan_id, tenant_id)
+        if not floor_plan:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Floor plan not found."
+            )
+        camera_nodes = await self.repo.get_camera_nodes_for_floor_plan(floor_plan_id, tenant_id)
+        lines = await self.repo.get_spatial_lines_for_floor_plan(floor_plan_id, tenant_id)
+        return FloorPlanLayoutResponse(
+            floor_plan=FloorPlanResponse.model_validate(floor_plan),
+            camera_nodes=[CameraNodeResponse.model_validate(c) for c in camera_nodes],
+            lines=[SpatialLineResponse.model_validate(l) for l in lines]
+        )
+
+    async def save_floor_plan_layout(
+        self,
+        tenant_id: uuid.UUID,
+        floor_plan_id: uuid.UUID,
+        data: SaveLayoutRequest
+    ) -> FloorPlanLayoutResponse:
+        try:
+            floor_plan, updated_nodes, active_lines = await self.repo.save_floor_plan_layout(
+                tenant_id=tenant_id,
+                floor_plan_id=floor_plan_id,
+                camera_nodes_data=data.camera_nodes,
+                lines_data=data.lines
+            )
+            await self.db.commit()
+            await self.db.refresh(floor_plan)
+            return FloorPlanLayoutResponse(
+                floor_plan=FloorPlanResponse.model_validate(floor_plan),
+                camera_nodes=[CameraNodeResponse.model_validate(c) for c in updated_nodes],
+                lines=[SpatialLineResponse.model_validate(l) for l in active_lines]
+            )
+        except ValueError as e:
+            await self.db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(e)
+            )
+        except Exception as e:
+            await self.db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to save floor plan layout: {str(e)}"
+            )
 
     async def create_camera_zone(self, tenant_id: uuid.UUID, camera_id: uuid.UUID, data: CameraZoneCreate) -> CameraZone:
         node = await self.repo.get_camera_node_by_id(camera_id, tenant_id)

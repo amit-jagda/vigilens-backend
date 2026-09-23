@@ -1,7 +1,7 @@
 import uuid
 import datetime
-from typing import List, Optional, Dict
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from typing import List, Optional, Dict, Union, Any
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 # ==========================================
 # CAMERA & SPATIAL TOPOLOGY SCHEMAS
@@ -26,8 +26,92 @@ class CameraNodeResponse(BaseModel):
     tenant_id: uuid.UUID
     name: str
     location_label: Optional[str] = None
+    floor_plan_id: Optional[uuid.UUID] = None
+    x_coord: Optional[float] = None
+    y_coord: Optional[float] = None
+    fov_angle: Optional[float] = 0.0
     created_at: datetime.datetime
     update_at: datetime.datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CameraNodeLayoutUpdate(BaseModel):
+    id: uuid.UUID
+    x_coord: Optional[float] = None
+    y_coord: Optional[float] = None
+    fov_angle: Optional[float] = None
+
+
+class SpatialLineUpsert(BaseModel):
+    id: Optional[Union[uuid.UUID, str]] = None  # null or non-UUID = new line
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    line_type: str = "wall"
+    label: Optional[str] = None
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def sanitize_id(cls, v: Any) -> Optional[uuid.UUID]:
+        if not v:
+            return None
+        if isinstance(v, uuid.UUID):
+            return v
+        try:
+            return uuid.UUID(str(v))
+        except (ValueError, AttributeError):
+            return None
+
+
+class SaveLayoutRequest(BaseModel):
+    camera_nodes: List[CameraNodeLayoutUpdate] = Field(default_factory=list)
+    lines: List[SpatialLineUpsert] = Field(default_factory=list)
+
+
+class FloorPlanCreate(BaseModel):
+    name: str = Field(..., example="Ground Floor Main Layout")
+    image_filepath: Optional[str] = None
+    canvas_width_px: int = 1920
+    canvas_height_px: int = 1080
+    scale_meters_per_px: Optional[float] = None
+
+
+class SpatialLineResponse(BaseModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    floor_plan_id: uuid.UUID
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    line_type: str
+    label: Optional[str] = None
+    created_at: datetime.datetime
+    update_at: datetime.datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FloorPlanResponse(BaseModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    name: str
+    image_filepath: Optional[str] = None
+    canvas_width_px: int
+    canvas_height_px: int
+    scale_meters_per_px: Optional[float] = None
+    created_at: datetime.datetime
+    update_at: datetime.datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FloorPlanLayoutResponse(BaseModel):
+    floor_plan: FloorPlanResponse
+    camera_nodes: List[CameraNodeResponse]
+    lines: List[SpatialLineResponse]
 
     model_config = ConfigDict(from_attributes=True)
 

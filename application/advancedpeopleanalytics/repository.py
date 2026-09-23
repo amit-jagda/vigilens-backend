@@ -21,8 +21,11 @@ from application.advancedpeopleanalytics.model import (
     CameraZoneLink,
     ZoneCrossingEvent,
     CrossCameraIdentityLink,
-    PersonTimelineEvent
+    PersonTimelineEvent,
+    FloorPlan,
+    SpatialLine
 )
+from application.advancedpeopleanalytics.schema import CameraNodeLayoutUpdate, SpatialLineUpsert
 from modules.employees.model import Employee, EmployeeEmbedding
 
 class AdvancedPeopleAnalyticsRepository:
@@ -175,6 +178,154 @@ class AdvancedPeopleAnalyticsRepository:
 
         await self.db.flush()
         return True
+
+    # ==========================================
+    # FLOOR PLANS & SPATIAL LINES
+    # ==========================================
+
+    async def create_floor_plan(
+        self,
+        tenant_id: uuid.UUID,
+        name: str,
+        canvas_width_px: int = 1920,
+        canvas_height_px: int = 1080,
+        scale_meters_per_px: Optional[float] = None,
+        image_filepath: Optional[str] = None
+    ) -> FloorPlan:
+        floor_plan = FloorPlan(
+            tenant_id=tenant_id,
+            name=name,
+            canvas_width_px=canvas_width_px,
+            canvas_height_px=canvas_height_px,
+            scale_meters_per_px=scale_meters_per_px,
+            image_filepath=image_filepath
+        )
+        self.db.add(floor_plan)
+        await self.db.flush()
+        return floor_plan
+
+    async def get_floor_plans(self, tenant_id: uuid.UUID) -> List[FloorPlan]:
+        stmt = select(FloorPlan).where(
+            FloorPlan.tenant_id == tenant_id,
+            FloorPlan.is_delete == False
+        ).order_by(FloorPlan.created_at.desc())
+        res = await self.db.execute(stmt)
+        return list(res.scalars().all())
+
+    async def get_floor_plan_by_id(self, floor_plan_id: uuid.UUID, tenant_id: uuid.UUID) -> Optional[FloorPlan]:
+        stmt = select(FloorPlan).where(
+            FloorPlan.id == floor_plan_id,
+            FloorPlan.tenant_id == tenant_id,
+            FloorPlan.is_delete == False
+        )
+        res = await self.db.execute(stmt)
+        return res.scalars().first()
+
+    async def get_spatial_lines_for_floor_plan(
+        self,
+        floor_plan_id: uuid.UUID,
+        tenant_id: uuid.UUID
+    ) -> List[SpatialLine]:
+        stmt = select(SpatialLine).where(
+            SpatialLine.floor_plan_id == floor_plan_id,
+            SpatialLine.tenant_id == tenant_id,
+            SpatialLine.is_delete == False
+        ).order_by(SpatialLine.created_at.asc())
+        res = await self.db.execute(stmt)
+        return list(res.scalars().all())
+
+    async def get_camera_nodes_for_floor_plan(
+        self,
+        floor_plan_id: uuid.UUID,
+        tenant_id: uuid.UUID
+    ) -> List[CameraNode]:
+        stmt = select(CameraNode).where(
+            CameraNode.floor_plan_id == floor_plan_id,
+            CameraNode.tenant_id == tenant_id,
+            CameraNode.is_delete == False
+        ).order_by(CameraNode.name.asc())
+        res = await self.db.execute(stmt)
+        return list(res.scalars().all())
+
+    async def save_floor_plan_layout(
+        self,
+        tenant_id: uuid.UUID,
+        floor_plan_id: uuid.UUID,
+        camera_nodes_data: List[CameraNodeLayoutUpdate],
+        lines_data: List[SpatialLineUpsert]
+    ) -> Tuple[FloorPlan, List[CameraNode], List[SpatialLine]]:
+        floor_plan = await self.get_floor_plan_by_id(floor_plan_id, tenant_id)
+        if not floor_plan:
+            raise ValueError("Floor plan not found.")
+
+        # 1. Update camera nodes positions and angles
+        updated_nodes: List[CameraNode] = []
+        for cam_update in camera_nodes_data:
+            node = await self.get_camera_node_by_id(cam_update.id, tenant_id)
+            if node:
+                if cam_update.x_coord is not None:
+                    node.x_coord = cam_update.x_coord
+                if cam_update.y_coord is not None:
+                    node.y_coord = cam_update.y_coord
+                if cam_update.fov_angle is not None:
+                    node.fov_angle = cam_update.fov_angle
+                node.floor_plan_id = floor_plan_id
+                updated_nodes.append(node)
+
+        # 2. Upsert spatial lines
+        submitted_line_ids = set()
+        active_lines: List[SpatialLine] = []
+
+        for line_item in lines_data:
+            if line_item.id:
+                stmt_line = select(SpatialLine).where(
+                    SpatialLine.id == line_item.id,
+                    SpatialLine.floor_plan_id == floor_plan_id,
+                    SpatialLine.tenant_id == tenant_id,
+                    SpatialLine.is_delete == False
+                )
+                res_line = await self.db.execute(stmt_line)
+                existing_line = res_line.scalars().first()
+                if existing_line:
+                    existing_line.x1 = line_item.x1
+                    existing_line.y1 = line_item.y1
+                    existing_line.x2 = line_item.x2
+                    existing_line.y2 = line_item.y2
+                    existing_line.line_type = line_item.line_type
+                    existing_line.label = line_item.label
+                    submitted_line_ids.add(existing_line.id)
+                    active_lines.append(existing_line)
+            else:
+                new_line = SpatialLine(
+                    tenant_id=tenant_id,
+                    floor_plan_id=floor_plan_id,
+                    x1=line_item.x1,
+                    y1=line_item.y1,
+                    x2=line_item.x2,
+                    y2=line_item.y2,
+                    line_type=line_item.line_type,
+                    label=line_item.label
+                )
+                self.db.add(new_line)
+                await self.db.flush()
+                submitted_line_ids.add(new_line.id)
+                active_lines.append(new_line)
+
+        # 3. Mark lines not in submitted list as deleted
+        stmt_all_lines = select(SpatialLine).where(
+            SpatialLine.floor_plan_id == floor_plan_id,
+            SpatialLine.tenant_id == tenant_id,
+            SpatialLine.is_delete == False
+        )
+        res_all_lines = await self.db.execute(stmt_all_lines)
+        all_lines = list(res_all_lines.scalars().all())
+
+        for line in all_lines:
+            if line.id not in submitted_line_ids:
+                line.is_delete = True
+
+        await self.db.flush()
+        return floor_plan, updated_nodes, active_lines
 
     async def create_camera_zone(
         self,

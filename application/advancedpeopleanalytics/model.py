@@ -263,6 +263,41 @@ class AdvancedEmployeeSessionDetection(BaseModel):
 # CAMERA TOPOLOGY & SPATIAL GRAPH MODELS
 # ==========================================
 
+class FloorPlan(BaseModel):
+    """
+    Represents an architectural floor plan or layout canvas for a tenant.
+    """
+    __tablename__ = "floor_plans"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    image_filepath: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    canvas_width_px: Mapped[int] = mapped_column(Integer, default=1920, server_default="1920", nullable=False)
+    canvas_height_px: Mapped[int] = mapped_column(Integer, default=1080, server_default="1080", nullable=False)
+    scale_meters_per_px: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    camera_nodes: Mapped[list["CameraNode"]] = relationship("CameraNode", back_populates="floor_plan")
+    spatial_lines: Mapped[list["SpatialLine"]] = relationship("SpatialLine", back_populates="floor_plan", cascade="all, delete-orphan")
+
+
+class SpatialLine(BaseModel):
+    """
+    Represents wall, corridor, or boundary lines drawn on a floor plan canvas.
+    """
+    __tablename__ = "spatial_lines"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    floor_plan_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("floor_plans.id", ondelete="CASCADE"), nullable=False)
+    x1: Mapped[float] = mapped_column(Float, nullable=False)
+    y1: Mapped[float] = mapped_column(Float, nullable=False)
+    x2: Mapped[float] = mapped_column(Float, nullable=False)
+    y2: Mapped[float] = mapped_column(Float, nullable=False)
+    line_type: Mapped[str] = mapped_column(String(50), default="wall", server_default="wall", nullable=False)
+    label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    floor_plan: Mapped["FloorPlan"] = relationship("FloorPlan", back_populates="spatial_lines")
+
+
 class CameraNode(BaseModel):
     """
     Represents a physical or virtual camera node location.
@@ -272,7 +307,12 @@ class CameraNode(BaseModel):
     tenant_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False) # e.g. "Reception"
     location_label: Mapped[str | None] = mapped_column(String(255), nullable=True) # e.g. "Main Entrance Floor 1"
+    floor_plan_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("floor_plans.id", ondelete="SET NULL"), nullable=True)
+    x_coord: Mapped[float | None] = mapped_column(Float, nullable=True)
+    y_coord: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fov_angle: Mapped[float | None] = mapped_column(Float, default=0.0, server_default="0.0", nullable=True)
 
+    floor_plan: Mapped["FloorPlan | None"] = relationship("FloorPlan", back_populates="camera_nodes")
     sessions: Mapped[list["AdvancedPeopleAnalyticsSession"]] = relationship(back_populates="camera_node")
     zones: Mapped[list["CameraZone"]] = relationship(back_populates="camera", cascade="all, delete-orphan")
     outgoing_node_links: Mapped[list["CameraNodeLink"]] = relationship(

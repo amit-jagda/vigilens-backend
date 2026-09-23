@@ -39,7 +39,11 @@ from application.advancedpeopleanalytics.schema import (
     HourlyDwellResponse,
     ReviewQueueCandidate,
     ReconcileIdentityRequest,
-    PhotoSearchResponse
+    PhotoSearchResponse,
+    FloorPlanCreate,
+    FloorPlanResponse,
+    FloorPlanLayoutResponse,
+    SaveLayoutRequest
 )
 
 
@@ -208,6 +212,105 @@ async def delete_camera_link(
         message="Camera link deleted successfully.",
         status=status.HTTP_200_OK,
         data=None
+    )
+
+
+# ==========================================
+# FLOOR PLANS & SPATIAL LAYOUT ENDPOINTS
+# ==========================================
+
+@router.post(
+    "/floor-plans",
+    response_model=StandardResponse[FloorPlanResponse],
+    status_code=status.HTTP_201_CREATED
+)
+async def create_floor_plan(
+    data: FloorPlanCreate,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Creates a new floor plan canvas layout for the tenant.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    floor_plan = await service.create_floor_plan(tenant_id, data)
+    return StandardResponse(
+        message="Floor plan created successfully.",
+        status=status.HTTP_201_CREATED,
+        data=floor_plan
+    )
+
+
+@router.get(
+    "/floor-plans",
+    response_model=StandardResponse[List[FloorPlanResponse]],
+    status_code=status.HTTP_200_OK
+)
+async def list_floor_plans(
+    current_user: User = Depends(require_viewer),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Lists all floor plans for the tenant.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    floor_plans = await service.get_floor_plans(tenant_id)
+    return StandardResponse(
+        message=f"Retrieved {len(floor_plans)} floor plan(s).",
+        status=status.HTTP_200_OK,
+        data=floor_plans
+    )
+
+
+@router.get(
+    "/floor-plans/{floor_plan_id}",
+    response_model=StandardResponse[FloorPlanLayoutResponse],
+    status_code=status.HTTP_200_OK
+)
+async def get_floor_plan_layout(
+    floor_plan_id: uuid.UUID,
+    current_user: User = Depends(require_viewer),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Retrieves full floor plan layout including assigned camera nodes and spatial lines.
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    layout = await service.get_floor_plan_layout(tenant_id, floor_plan_id)
+    return StandardResponse(
+        message="Floor plan layout retrieved successfully.",
+        status=status.HTTP_200_OK,
+        data=layout
+    )
+
+
+@router.post(
+    "/floor-plans/{floor_plan_id}/save-layout",
+    response_model=StandardResponse[FloorPlanLayoutResponse],
+    status_code=status.HTTP_200_OK
+)
+async def save_floor_plan_layout(
+    floor_plan_id: uuid.UUID,
+    data: SaveLayoutRequest,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Bulk saves the complete spatial canvas state in a single atomic transaction:
+    - Updates camera node positions (x, y) and FOV angles
+    - Upserts spatial lines (walls, corridors, boundaries)
+    - Removes omitted spatial lines for this floor plan
+    """
+    tenant_id = verify_tenant(current_user)
+    service = AdvancedPeopleAnalyticsService(db)
+    updated_layout = await service.save_floor_plan_layout(tenant_id, floor_plan_id, data)
+    return StandardResponse(
+        message="Floor plan layout saved successfully.",
+        status=status.HTTP_200_OK,
+        data=updated_layout
     )
 
 
