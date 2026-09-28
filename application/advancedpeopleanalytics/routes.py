@@ -975,7 +975,8 @@ async def daily_employee_checkin(
     employee_id: uuid.UUID,
     face_image: UploadFile = File(..., description="Selfie, headshot, or portrait of employee (Required)"),
     appearance_image: Optional[UploadFile] = File(None, description="Full-body outfit/clothing photo of employee today (Optional)"),
-    checkin_date: Optional[datetime.date] = Query(None, description="Date to anchor check-in to (defaults to today)"),
+    checkin_date: Optional[str] = Form(None, description="Date to anchor check-in to (YYYY-MM-DD) from multipart form"),
+    checkin_date_query: Optional[datetime.date] = Query(None, alias="checkin_date", description="Date to anchor check-in to from query parameter"),
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db)
 ):
@@ -992,13 +993,23 @@ async def daily_employee_checkin(
         )
     appearance_bytes = await appearance_image.read() if appearance_image else None
 
+    # Resolve date from Form body or Query parameter
+    resolved_date: Optional[datetime.date] = None
+    if checkin_date:
+        try:
+            resolved_date = datetime.date.fromisoformat(checkin_date.strip())
+        except (ValueError, TypeError):
+            pass
+    if resolved_date is None and checkin_date_query:
+        resolved_date = checkin_date_query
+
     service = AdvancedPeopleAnalyticsService(db)
     res = await service.daily_employee_checkin(
         tenant_id=tenant_id,
         employee_id=employee_id,
         face_bytes=face_bytes,
         appearance_bytes=appearance_bytes,
-        checkin_date=checkin_date
+        checkin_date=resolved_date
     )
     return StandardResponse(
         message=res.message,

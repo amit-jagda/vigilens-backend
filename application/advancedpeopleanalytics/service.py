@@ -479,20 +479,20 @@ class AdvancedPeopleAnalyticsService:
             # Schedule Celery background task
             from application.advancedpeopleanalytics.tasks import process_advanced_people_analytics_task
             process_advanced_people_analytics_task.delay(
-                str(session.id),
-                filepath,
-                line_start,
-                line_end,
-                similarity_threshold,
-                confidence_threshold,
-                str(user_id) if user_id else None,
-                track_employees,
-                register_new_visitors,
-                track_repeat_visitors,
-                line_crossing_analysis,
-                track_occupancy,
-                track_objects,
-                generate_video
+                session_id_str=str(session.id),
+                filepath=filepath,
+                line_start=line_start,
+                line_end=line_end,
+                similarity_threshold=similarity_threshold,
+                confidence_threshold=confidence_threshold,
+                user_id_str=str(user_id) if user_id else None,
+                track_employees=track_employees,
+                register_new_visitors=register_new_visitors,
+                track_repeat_visitors=track_repeat_visitors,
+                line_crossing_analysis=line_crossing_analysis,
+                track_occupancy=track_occupancy,
+                track_objects=track_objects,
+                generate_video=generate_video
             )
 
             sessions.append(session)
@@ -636,19 +636,20 @@ class AdvancedPeopleAnalyticsService:
         # Re-dispatch Celery worker task with stored session parameters
         from application.advancedpeopleanalytics.tasks import process_advanced_people_analytics_task
         process_advanced_people_analytics_task.delay(
-            str(session.id),
-            session.video_path,
-            session.line_start,
-            session.line_end,
-            session.similarity_threshold,
-            session.confidence_threshold,
-            str(user_id) if user_id else (str(session.created_by_id) if session.created_by_id else None),
-            session.track_employees,
-            session.register_new_visitors,
-            session.track_repeat_visitors,
-            session.line_crossing_analysis,
-            session.track_occupancy,
-            session.generate_video
+            session_id_str=str(session.id),
+            filepath=session.video_path,
+            line_start=session.line_start,
+            line_end=session.line_end,
+            similarity_threshold=session.similarity_threshold,
+            confidence_threshold=session.confidence_threshold,
+            user_id_str=str(user_id) if user_id else (str(session.created_by_id) if session.created_by_id else None),
+            track_employees=session.track_employees,
+            register_new_visitors=session.register_new_visitors,
+            track_repeat_visitors=session.track_repeat_visitors,
+            line_crossing_analysis=session.line_crossing_analysis,
+            track_occupancy=session.track_occupancy,
+            track_objects=session.track_objects,
+            generate_video=session.generate_video
         )
 
         session.completed_percentage = 0
